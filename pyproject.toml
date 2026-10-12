@@ -1,0 +1,6 @@
+# Build requirements for isolated (PEP 517) builds, as uv and pip do for a git dependency:
+# setup.py needs numpy's headers for the C extensions (the bounds are setup.py's own), and
+# imports versioneer.py from the source tree, which only the legacy backend puts on sys.path.
+[build-system]
+requires = ["setuptools", "numpy>=2.0.0rc1,<2.6"]
+build-backend = "setuptools.build_meta:__legacy__"
