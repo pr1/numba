@@ -304,6 +304,38 @@ class TestDebugInfoEmission(TestCase):
         else:
             self.fail('Assertion on DILocalVariable not made')
 
+    def test_DILocation_inlined_from_another_file(self):
+        """ Tests that a statement inlined at the Numba IR level from another
+        file keeps that file: its DILocation is at the callee's own line and
+        scoped by a DILexicalBlockFile naming the callee's file.
+        """
+        from numba.tests import inlining_usecases
+
+        @njit(debug=True)
+        def foo():
+            return inlining_usecases.bar()
+
+        metadata = self._get_metadata(foo, sig=())
+        md_def_map = self._get_metadata_map(metadata)
+
+        lines, start = inspect.getsourcelines(inlining_usecases.bar.py_func)
+        bar_return = start + next(i for i, line in enumerate(lines)
+                                  if line.strip().startswith('return'))
+
+        def labels(pattern):
+            return {label for label, md in md_def_map.items()
+                    if re.match(pattern, md)}
+
+        files = labels(r'!DIFile\(.*filename: "inlining_usecases\.py"')
+        self.assertEqual(len(files), 1)
+        (bar_file,) = files
+        scopes = labels(r'!DILexicalBlockFile\(.*file: %s\b' % bar_file)
+        self.assertEqual(len(scopes), 1)
+        (bar_scope,) = scopes
+        located = labels(r'!DILocation\(.*line: %d\b.*scope: %s\b'
+                         % (bar_return, bar_scope))
+        self.assertGreater(len(located), 0)
+
     @TestCase.run_test_in_subprocess(envvars=_NUMBA_OPT_0_ENV)
     def test_DILocation_entry_blk(self):
         # Needs a subprocess as jitting literally anything at any point in the

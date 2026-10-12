@@ -456,7 +456,8 @@ class Lower(BaseLower):
 
     def lower_inst(self, inst):
         # Set debug location for all subsequent LL instructions
-        self.debuginfo.mark_location(self.builder, self.loc.line)
+        self.debuginfo.mark_location(self.builder, self.loc.line,
+                                     self.loc.filename)
         self.notify_loc(self.loc)
         self.debug_print(str(inst))
         if isinstance(inst, ir.Assign):

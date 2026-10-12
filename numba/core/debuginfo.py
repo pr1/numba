@@ -34,8 +34,10 @@ class AbstractDIBuilder(metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
-    def mark_location(self, builder, line):
-        """Emit source location information to the given IRBuilder.
+    def mark_location(self, builder, line, filename=None):
+        """Emit source location information to the given IRBuilder. A
+        *filename* other than the function's own marks a statement inlined
+        from another file.
         """
         pass
 
@@ -67,7 +69,7 @@ class DummyDIBuilder(AbstractDIBuilder):
                       datamodel=None, argidx=None):
         pass
 
-    def mark_location(self, builder, line):
+    def mark_location(self, builder, line, filename=None):
         pass
 
     def mark_subprogram(self, function, qualname, argnames, argtypes, line):
@@ -311,8 +313,8 @@ class DIBuilder(AbstractDIBuilder):
 
         return builder.call(decl, [allocavalue, mdlocalvar, mdexpr])
 
-    def mark_location(self, builder, line):
-        builder.debug_metadata = self._add_location(line)
+    def mark_location(self, builder, line, filename=None):
+        builder.debug_metadata = self._add_location(line, filename)
 
     def mark_subprogram(self, function, qualname, argnames, argtypes, line):
         name = qualname
@@ -362,10 +364,10 @@ class DIBuilder(AbstractDIBuilder):
         self.subprograms.append(subp)
         return subp
 
-    def _add_location(self, line):
+    def _add_location(self, line, filename=None):
         """Emit location metatdaa
         """
-        loc = self._di_location(line)
+        loc = self._di_location(line, filename)
         return loc
 
     @classmethod
@@ -384,10 +386,11 @@ class DIBuilder(AbstractDIBuilder):
     # Helpers to emit the metadata nodes
     #
 
-    def _di_file(self):
+    def _di_file(self, filepath=None):
+        filepath = self.filepath if filepath is None else filepath
         return self.module.add_debug_info('DIFile', {
-            'directory': os.path.dirname(self.filepath),
-            'filename': os.path.basename(self.filepath),
+            'directory': os.path.dirname(filepath),
+            'filename': os.path.basename(filepath),
         })
 
     def _di_compile_unit(self):
@@ -448,9 +451,28 @@ class DIBuilder(AbstractDIBuilder):
             'unit': self.dicompileunit,
         }, is_distinct=True)
 
-    def _di_location(self, line):
+    def _di_location(self, line, filename=None):
         return self.module.add_debug_info('DILocation', {
             'line': line,
             'column': 1,
-            'scope': self.subprograms[-1],
+            'scope': self._di_location_scope(filename),
+        })
+
+    def _di_location_scope(self, filename):
+        # Numba IR inlining pastes a callee's statements with their own
+        # locations, so a statement can come from another file than the
+        # function being compiled. Scoping its location with a
+        # DILexicalBlockFile names that file in the line table, so debuggers
+        # and profilers map it to its own source rather than to the same line
+        # number in this function's file.
+        subprogram = self.subprograms[-1]
+        if filename is None:
+            return subprogram
+        filepath = os.path.abspath(filename)
+        if filepath == self.filepath:
+            return subprogram
+        return self.module.add_debug_info('DILexicalBlockFile', {
+            'scope': subprogram,
+            'file': self._di_file(filepath),
+            'discriminator': 0,
         })
