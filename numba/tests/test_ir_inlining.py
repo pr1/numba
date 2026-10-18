@@ -175,6 +175,31 @@ class TestFunctionInlining(MemoryLeakMixin, InliningBase):
             return foo()
         self.check(impl, inline_expect={'foo': True})
 
+    def test_inline_stararg(self):
+        # a star parameter, and a call with *args of a tuple built in the
+        # block; elsewhere the untyped inliner does not know a tuple's items
+        @njit(inline='always')
+        def foo(a, *b):
+            return a + b[0] * b[1]
+
+        @njit(inline='always')
+        def bar(a, b):
+            return a - b
+
+        def impl(x):
+            t = x, 4
+            return foo(x, 2, 3) + bar(*t)
+
+        self.check(impl, 5, inline_expect={'foo': True, 'bar': True})
+
+        def impl_vararg(*t):
+            return bar(*t)
+
+        with self.assertRaises(errors.UnsupportedError) as raises:
+            njit(impl_vararg)(1, 2)
+        self.assertIn("Calling a closure with *args is unsupported unless",
+                      str(raises.exception))
+
     def test_basic_inline_combos(self):
 
         def impl():
@@ -715,7 +740,8 @@ class TestOverloadInlining(MemoryLeakMixin, InliningBase):
         self.check(impl_static_getitem, Dummy(),
                    inline_expect={'getitem': False})
 
-    def test_inline_stararg_error(self):
+    def test_inline_stararg(self):
+        # a star parameter takes the trailing arguments as a tuple
         def foo(a, *b):
             return a + b[0]
 
@@ -726,11 +752,55 @@ class TestOverloadInlining(MemoryLeakMixin, InliningBase):
         def impl():
             return foo(3, 3, 5)
 
-        with self.assertRaises(NotImplementedError) as e:
-            self.check(impl, inline_expect={'foo': True})
+        self.check(impl, inline_expect={'foo': True})
 
-        self.assertIn("Stararg not supported in inliner for arg 1 *b",
-                      str(e.exception))
+    def test_inline_stararg_call(self):
+        # a call with *args: of the compiled function's own star parameter,
+        # whose type gives its items, and of a star parameter forwarded
+        def foo(a, b):
+            return a * 10 + b
+
+        @overload(foo, inline='always')
+        def overload_foo(a, b):
+            return lambda a, b: a * 10 + b
+
+        def bar(*args):
+            return foo(*args)
+
+        @overload(bar, inline='always')
+        def overload_bar(*args):
+            return lambda *args: foo(*args)
+
+        def impl(*args):
+            return foo(*args) + bar(*args) + bar(args[1], 3)
+
+        self.check(impl, 1, 2, inline_expect={'foo': True, 'bar': True})
+
+    def test_inline_stararg_forwarding_copies(self):
+        # a star parameter forwarded to a fixed one, after an argument of
+        # its own, inlines to plain copies of the call's arguments: the
+        # packed tuple is dead
+        def foo(a, b, c):
+            return a - b * c
+
+        @overload(foo, inline='always')
+        def overload_foo(a, b, c):
+            return lambda a, b, c: a - b * c
+
+        def bar(*args):
+            return foo(10, *args)
+
+        @overload(bar, inline='always')
+        def overload_bar(*args):
+            return lambda *args: foo(10, *args)
+
+        def impl(x):
+            return bar(x, 2)
+
+        fir = self.check(impl, 5, inline_expect={'foo': True, 'bar': True})
+        ops = {expr.op for expr in fir.blocks[0].find_exprs()}
+        self.assertNotIn('build_tuple', ops)
+        self.assertNotIn('static_getitem', ops)
 
     def test_basic_inline_combos(self):
 

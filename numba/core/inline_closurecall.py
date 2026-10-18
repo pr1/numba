@@ -1,6 +1,7 @@
 import types as pytypes  # avoid confusion with numba.types
 import copy
 import ctypes
+import inspect
 import numba.core.analysis
 from numba.core import (types, typing, errors, ir, rewrites, config, ir_utils,
                         cgutils)
@@ -448,7 +449,8 @@ class InlineWorker(object):
         # 3. replace formal parameters with actual arguments
         callee_func = callee_ir.func_id.func
         args = _get_callee_args(call_expr, callee_func, block.body[i].loc,
-                                caller_ir)
+                                caller_ir, block.body[:i], self.typemap,
+                                self.calltypes)
 
         # 4. Update typemap
         if self._permit_update_type_and_call_maps:
@@ -658,7 +660,8 @@ def inline_closure_call(func_ir, glbls, block, i, callee, typingctx=None,
     _debug_dump(callee_ir)
 
     # 3. replace formal parameters with actual arguments
-    args = _get_callee_args(call_expr, callee, block.body[i].loc, func_ir)
+    args = _get_callee_args(call_expr, callee, block.body[i].loc, func_ir,
+                            block.body[:i], typemap, calltypes)
 
     debug_print("After arguments rename: ")
     _debug_dump(callee_ir)
@@ -749,15 +752,88 @@ def inline_closure_call(func_ir, glbls, block, i, callee, typingctx=None,
     return callee_blocks, var_dict
 
 
-def _get_callee_args(call_expr, callee, loc, func_ir):
+def _vararg_items(vararg, func_ir, body, typemap, calltypes, loc):
+    """The values a call `f(*vararg)` passes. Where the tuple is put
+    together earlier in the call's block, `body` up to the call, from
+    variables not assigned since (built, summed, or converted by tuple(),
+    as the interpreter writes `f(a, *t)`), they are those variables; the
+    rest are items by index of tuples whose type, or untyped the tuple they
+    are defined as, gives their number.
+    """
+    # Dels end lifetimes without changing values, and are stripped after
+    # inlining: the tuple holds its items until the call.
+    last = {}  # each variable's last assignment before the call
+    for index, stmt in enumerate(body):
+        if isinstance(stmt, ir.Assign):
+            last[stmt.target.name] = index, stmt.value
+
+    def unchanged(names, index):
+        # not assigned from `index` on: of the same value at the call
+        return all(last.get(name, (-1,))[0] < index for name in names)
+
+    def is_tuple(var):
+        return (typemap is None
+                or isinstance(typemap.get(var.name), types.BaseTuple))
+
+    def items(var):
+        index, value = last.get(var.name, (None, None))
+        if isinstance(value, ir.Var) and unchanged([value.name], index):
+            return items(value)
+        if isinstance(value, ir.Expr):
+            operands = [v.name for v in value.list_vars()]
+            if not unchanged(operands, index):
+                pass
+            elif value.op == 'build_tuple':
+                return list(value.items)
+            elif (value.op == 'binop' and value.fn == operator.add
+                    and is_tuple(value.lhs) and is_tuple(value.rhs)):
+                return items(value.lhs) + items(value.rhs)
+            elif (value.op == 'call' and len(value.args) == 1
+                    and not value.kws and not value.vararg
+                    and is_tuple(value.args[0])
+                    and guard(find_callname, func_ir, value)
+                    == ('tuple', 'builtins')):
+                return items(value.args[0])
+        return indexed(var)
+
+    def indexed(var):
+        if typemap is not None:
+            var_type = typemap.get(var.name)
+            count = (len(var_type) if isinstance(var_type, types.BaseTuple)
+                     else None)
+        else:
+            definition = guard(get_definition, func_ir, var)
+            count = (len(definition.items) if isinstance(definition, ir.Expr)
+                     and definition.op == 'build_tuple' else None)
+        if count is None:
+            msg = ("Calling a closure with *args is unsupported unless the "
+                   "tuple is built in the function or its type is known.")
+            raise errors.UnsupportedError(msg, loc)
+        values = [ir.Expr.static_getitem(var, j, None, loc)
+                  for j in range(count)]
+        if calltypes is not None:
+            for value in values:
+                calltypes[value] = None  # a tuple's item, as typeinfer has it
+        return values
+
+    return items(vararg)
+
+
+def _get_callee_args(call_expr, callee, loc, func_ir, body=(), typemap=None,
+                     calltypes=None):
     """Get arguments for calling 'callee', including the default arguments.
     keyword arguments are currently only handled when 'callee' is a function.
+    `body` holds the statements before the call in its block, and `typemap`
+    and `calltypes` are the caller's if it is typed: they give the items of
+    a call with *args.
     """
+    vararg_items = None
     if call_expr.op == 'call':
         args = list(call_expr.args)
         if call_expr.vararg:
-            msg = "Calling a closure with *args is unsupported."
-            raise errors.UnsupportedError(msg, call_expr.loc)
+            vararg_items = _vararg_items(call_expr.vararg, func_ir, body,
+                                         typemap, calltypes, call_expr.loc)
+            args += vararg_items
     elif call_expr.op == 'getattr':
         args = [call_expr.value]
     elif ir_utils.is_operator_or_getitem(call_expr):
@@ -773,12 +849,16 @@ def _get_callee_args(call_expr, callee, loc, func_ir):
         normal_handler = lambda index, param, default: default
         default_handler = lambda index, param, default: ir.Const(default, loc)
 
-        # Throw error for stararg
-        # TODO: handle stararg
-        def stararg_handler(index, param, default):
-            raise NotImplementedError(
-                "Stararg not supported in inliner for arg {} {}".format(
-                    index, param))
+        def stararg_handler(index, param, values):
+            # The star parameter takes the trailing arguments: the call's own
+            # *args tuple if they are exactly its items, else a new tuple.
+            if vararg_items is not None and len(values) == len(vararg_items):
+                return call_expr.vararg
+            if not all(isinstance(v, ir.Var) for v in values):
+                msg = ("A star parameter taking part of a *args tuple is "
+                       "unsupported in the inliner.")
+                raise errors.UnsupportedError(msg, loc)
+            return ir.Expr.build_tuple(list(values), loc)
         if call_expr.op == 'call':
             kws = dict(call_expr.kws)
         else:
@@ -789,6 +869,12 @@ def _get_callee_args(call_expr, callee, loc, func_ir):
     else:
         # TODO: handle arguments for make_function case similar to function
         # case above
+        callee_code = (callee.code if hasattr(callee, 'code')
+                       else callee.__code__)
+        if callee_code.co_flags & inspect.CO_VARARGS:
+            # each argument would bind to the parameter of its position
+            msg = "Inlining a closure with a star parameter is unsupported."
+            raise errors.UnsupportedError(msg, loc)
         callee_defaults = (callee.defaults if hasattr(callee, 'defaults')
                            else callee.__defaults__)
         if callee_defaults:
