@@ -2030,13 +2030,14 @@ class ArrayAnalysis(object):
         to be used to replace the index variable in the outer getitem or
         setitem instruction.  The second item is also a tuple returning
         the shape and prepending instructions.
+        A None in the index is a new axis of size 1, and axes the index
+        leaves out are whole, as in NumPy.
         """
         typ = self.typemap[var.name]
         require(isinstance(typ, types.ArrayCompatible))
         ind_typ = self.typemap[ind_var.name]
-        ind_shape = equiv_set._get_shape(ind_var)
         var_shape = equiv_set._get_shape(var)
-        if isinstance(ind_typ, types.SliceType):
+        if isinstance(ind_typ, (types.SliceType, types.Integer)):
             seq_typs = (ind_typ,)
             seq = (ind_var,)
         else:
@@ -2044,7 +2045,8 @@ class ArrayAnalysis(object):
             seq, op = find_build_sequence(self.func_ir, ind_var)
             require(op == "build_tuple")
             seq_typs = tuple(self.typemap[x.name] for x in seq)
-        require(len(ind_shape) == len(seq_typs) == len(var_shape))
+        axes = sum(not isinstance(t, types.NoneType) for t in seq_typs)
+        require(axes <= len(var_shape))
         stmts = []
 
         def to_shape(typ, index, dsize):
@@ -2060,12 +2062,15 @@ class ArrayAnalysis(object):
         shape_list = []
         index_var_list = []
         replace_index = False
-        for (typ, size, dsize, orig_ind) in zip(seq_typs,
-                                                ind_shape,
-                                                var_shape,
-                                                seq):
+        sizes = iter(var_shape)
+        for (typ, orig_ind) in zip(seq_typs, seq):
+            if isinstance(typ, types.NoneType):
+                # a new axis of size 1
+                shape_list.append(1)
+                index_var_list.append(orig_ind)
+                continue
             # Convert the given dimension of the get/setitem index expr.
-            shape_part, index_var_part = to_shape(typ, size, dsize)
+            shape_part, index_var_part = to_shape(typ, orig_ind, next(sizes))
             shape_list.append(shape_part)
 
             # to_shape will return index_var_part as not None if a
@@ -2077,6 +2082,8 @@ class ArrayAnalysis(object):
                 index_var_list.append(index_var_part)
             else:
                 index_var_list.append(orig_ind)
+        # axes the index leaves out are whole
+        shape_list.extend(sizes)
 
         # If at least one of the dimensions required a new slice variable
         # then we'll need to replace the build_tuple for this get/setitem.
@@ -2087,17 +2094,17 @@ class ArrayAnalysis(object):
                 replacement_build_tuple_var = ir.Var(
                     scope,
                     mk_unique_var("replacement_build_tuple"),
-                    ind_shape[0].loc,
+                    ind_var.loc,
                 )
                 # Create the build tuple from the accumulated index vars above.
                 new_build_tuple = ir.Expr.build_tuple(
-                    index_var_list, ind_shape[0].loc
+                    index_var_list, ind_var.loc
                 )
                 stmts.append(
                     ir.Assign(
                         value=new_build_tuple,
                         target=replacement_build_tuple_var,
-                        loc=ind_shape[0].loc,
+                        loc=ind_var.loc,
                     )
                 )
                 # New build_tuple has same type as the original one.

@@ -1911,6 +1911,17 @@ class ConvertSetItemPass:
                                 sliced_dims = 1
                             else:
                                 sliced_dims = 0
+                            # Axes the index leaves out are whole: `a[i] = b`
+                            # on a 2-d `a` sets one sliced dimension, from an
+                            # array or a scalar (not, say, a list).
+                            indexed = (len(index_typ)
+                                       if isinstance(index_typ, types.BaseTuple)
+                                       else 1)
+                            if target_typ.ndim > indexed and not isinstance(
+                                    value_typ, (types.Number,
+                                                types.npytypes.Array)):
+                                shape = None
+                            sliced_dims += target_typ.ndim - indexed
 
                             # Only create a parfor for this setitem if we know the
                             # shape of the output and number of dimensions set is
@@ -1943,8 +1954,8 @@ class ConvertSetItemPass:
         if shape:
             # Slice index is being used on the target array, we'll have to create
             # a sub-array so that the target dimension matches the given shape.
-            assert(isinstance(index_typ, types.BaseTuple) or
-                   isinstance(index_typ, types.SliceType))
+            assert isinstance(index_typ, (types.BaseTuple, types.SliceType,
+                                          types.Integer))
             # setitem has a custom target shape
             size_vars = shape
             # create a new target array via getitem

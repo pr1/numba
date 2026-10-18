@@ -2656,6 +2656,28 @@ class TestParforsSlice(TestParforsBase):
         x2 = np.array(4)
         self.check(test_impl, x1, x2)
 
+    def test_parfor_slice_newaxis(self):
+        # A None axis has size 1: x[:, None] broadcasts against h instead of
+        # failing the runtime check that its size equals h's.
+        def test_impl(x, h):
+            return x[:, None] * h
+
+        self.check(test_impl, np.arange(3.0), np.ones((3, 4)))
+
+    def test_parfor_setitem_row(self):
+        # `out[b] = expr` sets a whole row: it becomes a parfor that fuses
+        # with the expression's, and the expression allocates nothing.
+        def test_impl(out, x):
+            for b in range(1, out.shape[0]):
+                out[b] = out[b - 1] + x[b] * 2.0
+            return out
+
+        out = np.ones((4, 5))
+        x = np.arange(20.0).reshape(4, 5)
+        self.check(test_impl, out, x)
+        argtys = (types.float64[:, ::1], types.float64[:, ::1])
+        self.assertEqual(countArrayAllocs(test_impl, argtys), 0)
+
     def test_parfor_slice23(self):
         # issue #4630
         def test_impl(x):
