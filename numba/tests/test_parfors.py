@@ -2678,6 +2678,30 @@ class TestParforsSlice(TestParforsBase):
         argtys = (types.float64[:, ::1], types.float64[:, ::1])
         self.assertEqual(countArrayAllocs(test_impl, argtys), 0)
 
+    def test_parfor_masked_setitem_sequential(self):
+        # Masked assignments lowered sequentially: the mask's getitem in the
+        # loop body needs its call type (the threaded path retypes the body).
+        @njit(inline="always")
+        def update(best, key, lag, k):
+            wins = key > best
+            lag[wins] = k
+            best[wins] = key[wins]
+
+        def test_impl(best, key, lag, k):
+            update(best, key, lag, k)
+            return best, lag
+
+        args = (np.zeros(8), np.arange(8.0) - 4, np.zeros(8), 7.0)
+        expected = test_impl(*[np.copy(a) for a in args])
+        old = numba.parfors.parfor.sequential_parfor_lowering
+        numba.parfors.parfor.sequential_parfor_lowering = True
+        try:
+            got = njit(parallel=True)(test_impl)(*[np.copy(a) for a in args])
+        finally:
+            numba.parfors.parfor.sequential_parfor_lowering = old
+        np.testing.assert_array_equal(expected[0], got[0])
+        np.testing.assert_array_equal(expected[1], got[1])
+
     def test_parfor_slice23(self):
         # issue #4630
         def test_impl(x):

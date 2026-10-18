@@ -2006,6 +2006,9 @@ class ConvertSetItemPass:
             mask_var = ir.Var(scope, mk_unique_var("$mask_var"), loc)
             pass_states.typemap[mask_var.name] = bool_typ
             mask_val = ir.Expr.getitem(index, index_var, loc)
+            # Sequential lowering does not retype the loop body.
+            pass_states.calltypes[mask_val] = signature(
+                bool_typ, index_typ, index_var_typ)
             body_block.body.extend([
                ir.Assign(mask_val, mask_var, loc),
                ir.Branch(mask_var, true_label, end_label, loc)
