@@ -129,6 +129,11 @@ class Type(metaclass=_TypeMetaclass):
 
     def __reduce__(self):
         reconstructor, args, state = super(Type, self).__reduce__()
+        # _code numbers the type in its process, and unpickling interns it
+        # anew: without it, equal types pickle alike in every process, as the
+        # disk cache's keys need (a cached closure's contents are hashed).
+        if isinstance(state, dict):
+            state = {k: v for k, v in state.items() if k != '_code'}
         return (_type_reconstructor, (reconstructor, args, state))
 
     def unify(self, typingctx, other):
