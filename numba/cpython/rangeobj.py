@@ -157,7 +157,12 @@ def make_range_impl(int_type, range_state_type, range_iter_type):
                 one = context.get_constant(int_type, 1)
 
                 builder.store(builder.sub(count, one, flags=["nsw"]), countptr)
-                builder.store(builder.add(value, self.step), self.iter)
+                # The step past the last value is never used, so the iterator
+                # does not wrap: with `nsw`, LLVM knows a range from a
+                # non-negative start yields non-negative values, and drops
+                # the negative-index wraparound of indexing with them.
+                builder.store(builder.add(value, self.step, flags=["nsw"]),
+                              self.iter)
 
 range_impl_map = {
     types.int32 : (types.range_state32_type, types.range_iter32_type),

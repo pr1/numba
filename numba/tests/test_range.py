@@ -196,6 +196,37 @@ class TestRangeNumpy(TestCase):
         a = my_arange(np.uint64(6), np.uint64(0), np.int64(-1))
         self.assertPreciseEqual(a, np.arange(6, 0, -1, dtype=np.uint64))
 
+    def test_range_from_nonnegative_start_indexes_without_wraparound(self):
+        # The range iterator steps with `add nsw`, so LLVM proves that a
+        # range from a non-negative start yields non-negative values and
+        # drops the negative-index select of `a[i]`; the loop vectorizes.
+        @njit
+        def shift(a, start):
+            for i in range(start & 1023, a.shape[0]):
+                a[i] += 1.0
+
+        a = np.zeros(64)
+        shift(a, 10)
+        expected = np.zeros(64)
+        expected[10:] = 1.0
+        self.assertPreciseEqual(a, expected)
+        llvm_ir = shift.inspect_llvm(shift.signatures[0])
+        self.assertRegex(llvm_ir, r"load <\d+ x double>")
+
+    def test_negative_indices_still_wrap(self):
+        # The range proves non-negativity only where it holds: negative
+        # constants (also inside index tuples), negative runtime indices and
+        # ranges from a negative start still wrap around.
+        @njit
+        def reads(a, i, j, start):
+            total = a[-1, 0] + a[:, -1].sum() + a[i, -1] + a[j, j]
+            for k in range(start, 2):
+                total += a[k, k]
+            return total
+
+        a = np.arange(12.0).reshape(3, 4)
+        self.assertPreciseEqual(reads(a, 1, -2, -3), reads.py_func(a, 1, -2, -3))
+
 
 if __name__ == '__main__':
     unittest.main()
