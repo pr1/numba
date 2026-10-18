@@ -5,6 +5,7 @@
 
 import numpy
 import math
+import operator
 
 import types as pytypes
 import collections
@@ -636,7 +637,8 @@ def has_no_side_effect(rhs, lives, call_table):
             call_list == [parfor.internal_prange] or
             call_list == ['ceil', math] or
             call_list == [max] or
-            call_list == [int]):
+            call_list == [int] or
+            call_list == [tuple]):
             return True
         elif (isinstance(call_list[0], _Intrinsic) and
               (call_list[0]._name == 'empty_inferred' or
@@ -734,8 +736,16 @@ def find_potential_aliases(blocks, args, typemap, func_ir, alias_map=None,
                     continue
                 if isinstance(expr, ir.Var) and lhs!=expr.name:
                     _add_alias(lhs, expr.name, alias_map, arg_aliases)
+                # an item of a tuple whose making shows it: b = (a, i)[0]
+                item = None
+                if (isinstance(expr, ir.Expr) and expr.op == 'static_getitem'
+                        and isinstance(expr.index, int)):
+                    item = guard(_tuple_item, func_ir, typemap, expr.value,
+                                 expr.index)
+                if item is not None:
+                    _add_alias(lhs, item.name, alias_map, arg_aliases)
                 # subarrays like A = B[0] for 2D B
-                if (isinstance(expr, ir.Expr) and (expr.op == 'cast' or
+                elif (isinstance(expr, ir.Expr) and (expr.op == 'cast' or
                     expr.op in ['getitem', 'static_getitem'])):
                     _add_alias(lhs, expr.value.name, alias_map, arg_aliases)
                 if isinstance(expr, ir.Expr) and expr.op == 'inplace_binop':
@@ -777,6 +787,27 @@ def find_potential_aliases(blocks, args, typemap, func_ir, alias_map=None,
             alias_map[w] = alias_map[v]
 
     return alias_map, arg_aliases
+
+def _tuple_item(func_ir, typemap, tup, index):
+    """The variable put at `index` of the tuple `tup`, where its definition
+    shows it: built, summed, or converted by tuple(). An item taken out
+    aliases that variable; a tuple aliasing its items would make them all
+    aliases of each other."""
+    definition = get_definition(func_ir, tup)
+    require(isinstance(definition, ir.Expr))
+    if definition.op == 'build_tuple':
+        return definition.items[index]
+    if definition.op == 'binop' and definition.fn == operator.add:
+        lhs_type = typemap.get(definition.lhs.name) if typemap else None
+        require(isinstance(lhs_type, types.BaseTuple))
+        if index < len(lhs_type):
+            return _tuple_item(func_ir, typemap, definition.lhs, index)
+        return _tuple_item(func_ir, typemap, definition.rhs,
+                           index - len(lhs_type))
+    require(definition.op == 'call' and len(definition.args) == 1
+            and find_callname(func_ir, definition) == ('tuple', 'builtins'))
+    return _tuple_item(func_ir, typemap, definition.args[0], index)
+
 
 def _add_alias(lhs, rhs, alias_map, arg_aliases):
     if rhs in arg_aliases:

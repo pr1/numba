@@ -6,6 +6,7 @@
 import numba
 import numba.parfors.parfor
 from numba import njit, jit
+from numba.core.extending import overload
 from numba.core import ir_utils
 from numba.core import types, ir,  compiler
 from numba.core.registry import cpu_target
@@ -112,6 +113,47 @@ class TestRemoveDead(TestCase):
             B[i] = 3
 
         self.run_array_index_test(func)
+
+    def test_alias_tuple_item(self):
+        # an array taken out of a tuple aliases the array put in
+        def func(A, i):
+            t = (A, i)
+            B = t[0]
+            B[i] = 3
+
+        self.run_array_index_test(func)
+
+    def test_alias_tuple_item_after_inlining(self):
+        # the dead code removal after inlining an overload keeps a write
+        # through an array or a struct taken out of a tuple, a built one,
+        # a sum of tuples, and one made by tuple()
+        def touch():
+            pass
+
+        @overload(touch, inline='always')
+        def ol_touch():
+            return lambda: None
+
+        def built(A, i):
+            touch()
+            t = (A, i)
+            t[0][i] = 3
+
+        def summed(A, i):
+            touch()
+            t = (A,) + (i,)
+            t[0][i] = 3
+
+        def converted(A, i):
+            touch()
+            t = tuple((A, i))
+            t[0][i] = 3
+
+        for func in (built, summed, converted):
+            with self.subTest(func.__name__):
+                A = np.zeros(4)
+                njit(func)(A, 1)
+                self.assertEqual(A[1], 3)
 
     def test_alias_flat(self):
         def func(A, i):
