@@ -2702,6 +2702,31 @@ class TestParforsSlice(TestParforsBase):
         np.testing.assert_array_equal(expected[0], got[0])
         np.testing.assert_array_equal(expected[1], got[1])
 
+    def test_parfor_broadcast_operand_fuses(self):
+        # A broadcast operand is read at x[b, i, 0] beside h[i, j]; storage
+        # neither loop writes cannot carry a dependency between iterations,
+        # so the expression fuses with the setitem and allocates nothing.
+        def test_impl(out, x, h):
+            for b in range(1, out.shape[0]):
+                out[b] = out[b - 1] + x[b, :, None] * h
+            return out
+
+        out = np.ones((6, 2, 4))
+        x = np.arange(12.0).reshape(6, 2)
+        h = np.arange(8.0).reshape(2, 4)
+        self.check(test_impl, out, x, h)
+        argtys = (types.float64[:, :, ::1], types.float64[:, ::1],
+                  types.float64[:, ::1])
+        self.assertEqual(countArrayAllocs(test_impl, argtys), 0)
+
+    def test_parfor_overlapping_update(self):
+        # Storage both read and written still keeps NumPy's semantics.
+        def test_impl(a, x):
+            a[1:, :] = a[:-1] + x[:, None]
+            return a
+
+        self.check(test_impl, np.arange(12.0).reshape(4, 3), np.arange(3.0))
+
     def test_parfor_slice23(self):
         # issue #4630
         def test_impl(x):

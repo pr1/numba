@@ -4383,9 +4383,13 @@ def try_fuse(equiv_set, parfor1, parfor2, metadata, func_ir, typemap):
             return None, report
 
     func_ir._definitions = build_definitions(func_ir.blocks)
-    p1_cross_dep, p1_ip, p1_ia, p1_non_ia = has_cross_iter_dep(parfor1, func_ir, typemap)
+    written = _written_storage(func_ir, parfor1, parfor2)
+    p1_cross_dep, p1_ip, p1_ia, p1_non_ia = has_cross_iter_dep(
+        parfor1, func_ir, typemap, written=written)
     if not p1_cross_dep:
-        p2_cross_dep = has_cross_iter_dep(parfor2, func_ir, typemap, p1_ip, p1_ia, p1_non_ia)[0]
+        p2_cross_dep = has_cross_iter_dep(
+            parfor2, func_ir, typemap, p1_ip, p1_ia, p1_non_ia,
+            written=written)[0]
     else:
         p2_cross_dep = True
 
@@ -4500,13 +4504,52 @@ def remove_duplicate_definitions(blocks, nameset):
     return
 
 
+def _storage(func_ir, name):
+    """The storage an array variable reads: through getitem views to a
+    function argument, an attribute of one (a structref field), or a fresh
+    array. None if unknown.
+    """
+    while True:
+        definition = guard(get_definition, func_ir, name)
+        if isinstance(definition, ir.Arg):
+            return ("arg", definition.name)
+        if not isinstance(definition, ir.Expr):
+            return None
+        if definition.op in ("getitem", "static_getitem"):
+            name = definition.value.name
+        elif definition.op == "getattr":
+            owner = _storage(func_ir, definition.value.name)
+            return None if owner is None else (owner, definition.attr)
+        elif definition.op == "call":
+            return ("call", name)
+        else:
+            return None
+
+
+def _written_storage(func_ir, *parfors):
+    """The storage the setitems of the parfors write, or None if any is
+    unknown.
+    """
+    targets = set()
+    blocks = [b for p in parfors for b in (*p.loop_body.values(), p.init_block)]
+    while blocks:
+        for stmt in blocks.pop().body:
+            if isinstance(stmt, (ir.SetItem, ir.StaticSetItem)):
+                targets.add(stmt.target.name)
+            elif isinstance(stmt, Parfor):
+                blocks.extend((*stmt.loop_body.values(), stmt.init_block))
+    storage = {_storage(func_ir, name) for name in targets}
+    return None if None in storage else storage
+
+
 def has_cross_iter_dep(
         parfor,
         func_ir,
         typemap,
         index_positions=None,
         indexed_arrays=None,
-        non_indexed_arrays=None):
+        non_indexed_arrays=None,
+        written=None):
     # We should assume there is cross iteration dependency unless we can
     # prove otherwise.  Return True if there is a cross-iter dependency
     # that should prevent fusion, False if fusion is okay.
@@ -4701,6 +4744,17 @@ def has_cross_iter_dep(
                     op = stmt.value.op
                     # Make sure getitem accesses are fusion safe.
                     if op in ['getitem', 'static_getitem']:
+                        # A read of storage that neither loop writes cannot
+                        # depend on the order of iterations, however it is
+                        # indexed (a broadcast operand reads x[i, 0]).
+                        # `written` treats distinct arguments, and distinct
+                        # attributes of them, as distinct storage.
+                        if (written is not None
+                                and isinstance(typemap[stmt.value.value.name],
+                                               types.npytypes.Array)
+                                and _storage(func_ir, stmt.value.value.name)
+                                not in written):
+                            continue
                         if isinstance(typemap[stmt.value.value.name], types.npytypes.Array):
                             # Check index safety with prior array accesses.
                             if check_index(stmt.value.index,
