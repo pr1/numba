@@ -1383,6 +1383,48 @@ class TestUfuncIssues(TestCase):
             check(x, np.uint64(3))
             check(x, np.int64([2, 2, 3]))
 
+    def test_kernel_vectorizes_unbroadcast(self):
+        # A kernel whose inputs do not broadcast indexes them by the loop's
+        # own indices, so it vectorizes inside an outer loop too, and a
+        # strided view with contiguous rows is read with a constant inner
+        # stride, in vector loads rather than gathers; broadcast inputs and
+        # strided rows take the general loop.
+        @njit
+        def accumulate(out, a, b):
+            for k in range(a.shape[0] - 1):
+                np.add(out, a[k + 1] * b[k], out)
+
+        @njit
+        def interior(out, a, b):
+            np.multiply(a[:, 1:], b[:, 1:], out[:, 1:])
+
+        def accumulated(out, a, b):
+            for k in range(a.shape[0] - 1):
+                out += a[k + 1] * b[k]
+
+        a = np.arange(64, dtype=np.float32).reshape(4, 16)
+        for b in (a[::-1].copy(), np.arange(4, dtype=np.float32).reshape(4, 1)):
+            out, expected = np.ones(16, np.float32), np.ones(16, np.float32)
+            accumulate(out, a, b)
+            accumulated(expected, a, b)
+            self.assertPreciseEqual(out, expected)
+        self.assertRegex(accumulate.inspect_llvm(accumulate.signatures[0]),
+                         r"fadd(?: \w+)* <\d+ x float>")
+
+        b = a[::-1].copy()
+        out = np.zeros((4, 16), np.float32)
+        interior(out, a, b)
+        expected = np.zeros((4, 16), np.float32)
+        expected[:, 1:] = a[:, 1:] * b[:, 1:]
+        self.assertPreciseEqual(out, expected)
+        self.assertRegex(interior.inspect_llvm(interior.signatures[0]),
+                         r"load <\d+ x float>")
+        out = np.zeros((4, 32), np.float32)
+        interior(out[:, ::2], a, b)
+        expected = np.zeros((4, 32), np.float32)
+        expected[:, 2::2] = a[:, 1:] * b[:, 1:]
+        self.assertPreciseEqual(out, expected)
+
 
 class _LoopTypesTester(TestCase):
     """Test code generation for the different loop types defined by ufunc.

@@ -544,15 +544,51 @@ def numpy_ufunc_kernel(context, builder, sig, args, ufunc, kernel_class):
     else:
         order = 'C'
 
-    with cgutils.loop_nest(builder, loopshape, intp=intpty, order=order) as loop_indices:
-        vals_in = []
-        for i, (index, arg) in enumerate(zip(indices, inputs)):
-            index.update_indices(loop_indices, i)
-            vals_in.append(arg.load_data(index.as_values()))
+    # The broadcasting loop below stores each input's index only where its
+    # extent exceeds 1, a recurrence LLVM removes by unswitching the loop,
+    # which its cost limit forbids inside an outer loop: the kernel stays
+    # scalar. So the loop is unswitched here, on one test: when no input
+    # broadcasts, every array operand is indexed by the loop's own indices.
+    # A strided (layout A) operand with contiguous rows, the common view of a
+    # C array, is then addressed with its item size as a constant inner
+    # stride, which LLVM vectorizes; its runtime stride hides that.
+    exact = cgutils.true_bit
+    for arg in inputs:
+        if isinstance(arg, _ArrayHelper):
+            for extent, loop_extent in zip(arg.shape, loopshape[len(loopshape) - arg.ndim:]):
+                exact = builder.and_(exact, builder.icmp_unsigned('==', extent, loop_extent))
+    operands = []
+    for arg in inputs + outputs:
+        if isinstance(arg, _ArrayHelper) and arg.layout == 'A' and arg.ndim > 0:
+            itemsize = context.get_constant(types.intp, context.get_abi_sizeof(
+                context.get_data_type(arg.base_type)))
+            exact = builder.and_(exact, builder.icmp_unsigned('==', arg.strides[-1], itemsize))
+            arg = arg._replace(strides=arg.strides[:-1] + [itemsize])
+        operands.append(arg)
 
-        vals_out = _unpack_output_values(ufunc, builder, kernel.generate(*vals_in))
-        for val_out, output in zip(vals_out, outputs):
-            output.store_data(loop_indices, val_out)
+    def own_indices(arg, loop_indices):
+        # the trailing loop indices, one per axis of an array operand
+        ndim = arg.ndim if isinstance(arg, _ArrayHelper) else 0
+        return loop_indices[len(loop_indices) - ndim:]
+
+    with builder.if_else(exact, likely=True) as (unbroadcast, broadcast):
+        with unbroadcast:
+            with cgutils.loop_nest(builder, loopshape, intp=intpty, order=order) as loop_indices:
+                vals_in = [arg.load_data(own_indices(arg, loop_indices))
+                           for arg in operands[:ufunc.nin]]
+                vals_out = _unpack_output_values(ufunc, builder, kernel.generate(*vals_in))
+                for val_out, output in zip(vals_out, operands[ufunc.nin:]):
+                    output.store_data(loop_indices, val_out)
+        with broadcast:
+            with cgutils.loop_nest(builder, loopshape, intp=intpty, order=order) as loop_indices:
+                vals_in = []
+                for i, (index, arg) in enumerate(zip(indices, inputs)):
+                    index.update_indices(loop_indices, i)
+                    vals_in.append(arg.load_data(index.as_values()))
+
+                vals_out = _unpack_output_values(ufunc, builder, kernel.generate(*vals_in))
+                for val_out, output in zip(vals_out, outputs):
+                    output.store_data(loop_indices, val_out)
 
     out = _pack_output_values(ufunc, context, builder, sig.return_type, [o.return_val for o in outputs])
     return impl_ret_new_ref(context, builder, sig.return_type, out)
