@@ -2746,6 +2746,14 @@ class TestParforsSlice(TestParforsBase):
         for name in ("numba_parallel_for", "do_scheduling", "get_num_threads"):
             self.assertNotIn(name, llvm_ir)
 
+    def test_parfor_lower_rank_operand(self):
+        # An operand of lower rank is indexed with the trailing parfor
+        # indices, not the whole index tuple.
+        def test_impl(a, b):
+            return a + b
+
+        self.check(test_impl, np.ones((3, 2, 4)), np.arange(8.0).reshape(2, 4))
+
     def test_parfor_slice23(self):
         # issue #4630
         def test_impl(x):

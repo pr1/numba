@@ -3464,8 +3464,8 @@ def _gen_arrayexpr_getitem(
     elif ndims == 1:
         # Use last index for 1D arrays
         index_var = all_parfor_indices[-1]
-    # Handle known constant size
-    elif any([x is not None for x in size_consts]):
+    # Handle a lower rank (broadcast over leading axes) or known constant size
+    elif ndims < num_indices or any([x is not None for x in size_consts]):
         # Need a tuple as index
         ind_offset = num_indices - ndims
         tuple_var = ir.Var(var.scope, mk_unique_var(
