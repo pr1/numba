@@ -491,6 +491,28 @@ class TestFunctionInlining(MemoryLeakMixin, InliningBase):
             regex = rf'{basename}__locals__bar_v[0-9]+.x'
             self.assertRegex(name, regex)
 
+    def test_inlined_temporaries_stay_temporaries(self):
+        # An inlined temporary keeps its "$", so the array expression rewrite
+        # fuses `a + b * c` in the caller into one expression, as it does in
+        # `bar` compiled alone, instead of one expression per operator.
+
+        @njit(inline="always")
+        def bar(a, b, c):
+            return a + b * c
+
+        @njit(pipeline_class=IRPreservingTestPipeline)
+        def foo(a, b, c):
+            return bar(a, b, c)
+
+        a = np.arange(5.)
+        np.testing.assert_allclose(foo(a, a, a), a + a * a)
+        func_ir = foo.overloads[foo.signatures[0]].metadata['preserved_ir']
+        exprs = [stmt.value for blk in func_ir.blocks.values()
+                 for stmt in blk.body if isinstance(stmt, ir.Assign)]
+        arrayexprs = [e for e in exprs
+                      if isinstance(e, ir.Expr) and e.op == 'arrayexpr']
+        self.assertEqual(len(arrayexprs), 1)
+
 
 class TestRegisterJitableInlining(MemoryLeakMixin, InliningBase):
 

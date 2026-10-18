@@ -63,13 +63,18 @@ def _created_inlined_var_name(function_name, var_name):
     """Creates a name for an inlined variable based on the function name and the
     variable name. It does this "safely" to avoid the use of characters that are
     illegal in python variable names as there are occasions when function
-    generation needs valid python name tokens."""
+    generation needs valid python name tokens. A temporary (a name starting
+    with "$") stays a temporary: rewrites that work on temporaries, such as
+    the array expression rewrite, then treat inlined code as they treat the
+    caller's own."""
     inlined_name = f'{function_name}.{var_name}'
     # Replace angle brackets, e.g. "<locals>" is replaced with "_locals_"
     new_name = inlined_name.replace('<', '_').replace('>', '_')
     # The version "version" of the closure function e.g. foo$2 (id 2) is
     # rewritten as "foo_v2". Further "." is also replaced with "_".
     new_name = new_name.replace('.', '_').replace('$', '_v')
+    if var_name.startswith('$'):
+        new_name = '$' + new_name
     return new_name
 
 
