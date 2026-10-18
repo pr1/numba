@@ -562,6 +562,40 @@ def check_duplicates(axis, ndim):
             raise ValueError("duplicate value in 'axis'")
 
 
+@register_jitable
+def _numpy_sum_axis_contiguous(a, axis, ret_dtype):
+    # A C-contiguous array viewed as [outer, n, inner] around the summed axis:
+    # total(o, :) = sum(a(o, :, :), 1), adding a(o, k, :) for k ascending, as
+    # the general iterator does, a contiguous row at a time, which LLVM
+    # vectorizes; the general iterator walks pointers by runtime byte strides
+    # and accumulates through memory, about ten times slower. The innermost
+    # axis sums into a scalar.
+    axis = axis + a.ndim if axis < 0 else axis
+    shape = a.shape[1:]  # a.shape without the summed axis, once filled in
+    outer = 1
+    for d in range(axis):
+        shape = tuple_setitem(shape, d, a.shape[d])
+        outer *= a.shape[d]
+    inner = 1
+    for d in range(axis + 1, a.ndim):
+        inner *= a.shape[d]
+    values = a.reshape((outer, a.shape[axis], inner))
+    total = np.zeros(shape, ret_dtype)
+    rows = total.reshape((outer, inner))
+    if inner == 1:
+        for o in range(outer):
+            partial = ret_dtype(0)
+            for k in range(values.shape[1]):
+                partial += ret_dtype(values[o, k, 0])
+            rows[o, 0] = partial
+    else:
+        for o in range(outer):
+            for k in range(values.shape[1]):
+                for i in range(inner):
+                    rows[o, i] += ret_dtype(values[o, k, i])
+    return total
+
+
 @overload(np.sum)
 @overload_method(types.Array, "sum")
 def array_sum(a, axis=None, dtype=None):
@@ -590,6 +624,13 @@ def array_sum(a, axis=None, dtype=None):
                 check_axis_bounds(a, axis)
                 check_duplicates(axis, a.ndim)
                 return _numpy_sum(a, axis, dtype)
+        elif (isinstance(axis, types.Integer) and a.layout == 'C' and
+                isinstance(a.dtype, types.Number)):
+            ret_dtype = get_ret_dtype_if_any(a, dtype)
+
+            def array_sum_impl(a, axis=None, dtype=None):
+                check_axis_bounds(a, axis)
+                return _numpy_sum_axis_contiguous(a, axis, ret_dtype)
         else:
             def array_sum_impl(a, axis=None, dtype=None):
                 check_axis_bounds(a, axis)

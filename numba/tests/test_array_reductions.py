@@ -1128,6 +1128,28 @@ class TestArrayReductions(MemoryLeakMixin, TestCase):
         self.check_aggregation_magnitude(array_sum)
         self.check_aggregation_magnitude(array_sum_global)
 
+    def test_sum_axis_contiguous(self):
+        # A C-contiguous array sums along an axis a contiguous row at a time,
+        # which vectorizes, adding in the order of the general iteration
+        # (along the axis, ascending); the innermost axis sums into a scalar.
+        @njit
+        def sum_axis(a, axis):
+            return np.sum(a, axis=axis)
+
+        def in_order(a, axis):
+            total = np.zeros(np.delete(a.shape, axis), np.sum(a[:0]).dtype)
+            for k in range(a.shape[axis]):
+                total += np.take(a, k, axis)
+            return total
+
+        a = np.random.default_rng(42).standard_normal((6, 5, 32)).astype(np.float32)
+        for b in (a, a.astype(np.int8), a.astype(np.complex64), a[:, :0], a.transpose(2, 0, 1),
+                  a[:, :, ::2]):
+            for axis in (0, 1, 2, -1):
+                self.assertPreciseEqual(sum_axis(b, axis), in_order(b, axis))
+        self.assertRegex(sum_axis.inspect_llvm(sum_axis.signatures[0]),
+                         r"fadd(?: \w+)* <\d+ x float>")
+
     def test_cumsum_magnitude(self):
         self.check_aggregation_magnitude(array_cumsum)
         self.check_aggregation_magnitude(array_cumsum_global)
