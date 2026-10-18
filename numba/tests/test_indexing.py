@@ -1074,6 +1074,30 @@ class TestSetItem(MemoryLeakMixin, TestCase):
         slicing_1d_usecase_set(dst, src, None, 2, 1)
         self.assertEqual(dst.tolist(), [[1, 2], [3, 4], [4, 5]])
 
+    def test_setitem_array_vectorizes(self):
+        # An array assigned to a slice is broadcast onto it with a select per
+        # dimension, not a division per element, so the copy vectorizes; an
+        # overlapping source is copied first, in a loop of its own.
+        @njit
+        def assign(out, src):
+            out[:] = src
+
+        @njit
+        def shift(a):
+            a[1:] = a[:-1]
+
+        src = np.arange(16.0)
+        out = np.zeros(16)
+        assign(out, src)
+        self.assertPreciseEqual(out, src)
+        llvm_ir = assign.inspect_llvm(assign.signatures[0])
+        self.assertRegex(llvm_ir, r"load <\d+ x double>")
+        a = np.arange(16.0)
+        shift(a)
+        expected = np.arange(16.0)
+        expected[1:] = expected[:-1].copy()
+        self.assertPreciseEqual(a, expected)
+
     def test_setitem_readonly(self):
         arr = np.arange(5)
         arr.flags.writeable = False

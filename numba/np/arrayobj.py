@@ -1497,80 +1497,24 @@ def extents_may_overlap(context, builder, a_start, a_end, b_start, b_end):
     return may_overlap
 
 
-def maybe_copy_source(context, builder, use_copy, indexer,
-                      srcty, src, src_shapes, src_strides, src_data):
-    ptrty = src_data.type
-
-    copy_layout = 'C'
-    copy_data = cgutils.alloca_once_value(builder, src_data)
-    copy_shapes = src_shapes
-    copy_strides = None  # unneeded for contiguous arrays
-
-    with builder.if_then(use_copy, likely=False):
-        # Allocate temporary scratchpad
-        # XXX: should we use a stack-allocated array for very small
-        # data sizes?
-        allocsize = builder.mul(src.itemsize, src.nitems)
-        data = context.nrt.allocate(builder, allocsize)
-        voidptrty = data.type
-        data = builder.bitcast(data, ptrty)
-        builder.store(data, copy_data)
-
-        # Copy source data into scratchpad
-        intp_t = context.get_value_type(types.intp)
-
-        with cgutils.loop_nest(builder, src_shapes, intp_t) as indices:
-            src_ptr = cgutils.get_item_pointer2(context, builder, src_data,
-                                                src_shapes, src_strides,
-                                                srcty.layout, indices)
-            dest_ptr = cgutils.get_item_pointer2(context, builder, data,
-                                                 copy_shapes, copy_strides,
-                                                 copy_layout, indices)
-            builder.store(builder.load(src_ptr), dest_ptr)
-
-    def src_getitem():
-        src_ptr = cgutils.alloca_once(builder, ptrty)
-        src_indices = indexer.get_src_indices()[-len(src_shapes):]
-        if len(src_shapes) > len(src_indices):
-            # If the source has fewer dimensions than the indexer, we need
-            # to add some leading zeros to the indices to get the correct
-            # broadcasting behavior.
-            zero = context.get_constant(types.intp, 0)
-            src_indices = (
-                [zero] * (len(src_shapes) -
-                          len(src_indices)) + list(src_indices)
-            )
-
-        src_indices = [
-            builder.srem(src_indices[i], src_shapes[i])
-            for i in range(len(src_shapes))
-        ]
-        with builder.if_else(use_copy, likely=False) as (if_copy, otherwise):
-            with if_copy:
-                builder.store(
-                    cgutils.get_item_pointer2(context, builder,
-                                              builder.load(copy_data),
-                                              copy_shapes, copy_strides,
-                                              copy_layout, src_indices,
-                                              wraparound=False),
-                    src_ptr)
-            with otherwise:
-                builder.store(
-                    cgutils.get_item_pointer2(context, builder, src_data,
-                                              src_shapes, src_strides,
-                                              srcty.layout, src_indices,
-                                              wraparound=False),
-                    src_ptr)
-        return load_item(context, builder, srcty, builder.load(src_ptr))
-
-    def src_cleanup():
-        # Deallocate memory
-        with builder.if_then(use_copy, likely=False):
-            data = builder.load(copy_data)
-            data = builder.bitcast(data, voidptrty)
-            context.nrt.free(builder, data)
-
-    return src_getitem, src_cleanup
+def copy_to_contiguous(context, builder, srcty, src, src_shapes, src_strides,
+                       src_data):
+    """
+    Copy the source array's data into a new C-contiguous NRT allocation and
+    return its data pointer; the caller frees it with context.nrt.free.
+    """
+    allocsize = builder.mul(src.itemsize, src.nitems)
+    data = builder.bitcast(context.nrt.allocate(builder, allocsize),
+                           src_data.type)
+    intp_t = context.get_value_type(types.intp)
+    with cgutils.loop_nest(builder, src_shapes, intp_t) as indices:
+        src_ptr = cgutils.get_item_pointer2(context, builder, src_data,
+                                            src_shapes, src_strides,
+                                            srcty.layout, indices)
+        dest_ptr = cgutils.get_item_pointer2(context, builder, data,
+                                             src_shapes, None, 'C', indices)
+        builder.store(builder.load(src_ptr), dest_ptr)
+    return data
 
 
 def _bc_adjust_dimension(context, builder, shapes, strides, target_shape):
@@ -2039,27 +1983,54 @@ def fancy_setslice(context, builder, sig, args, index_types, indices):
                                                       dest_data)
         use_copy = extents_may_overlap(context, builder, src_start, src_end,
                                        dest_start, dest_end)
-        src_getitem, src_cleanup = maybe_copy_source(context, builder, use_copy,
-                                                     indexer,
-                                                     srcty, src, src_shapes,
-                                                     src_strides, src_data)
 
-        # Loop on destination and copy from source to destination
-        dest_indices = indexer.begin_loops()
+        def assign_from(loop_indexer, data, layout, strides):
+            # One loop over the destination, reading the source broadcast
+            # onto it. A broadcast source extent is 1 or the destination's,
+            # and the index is below the destination's: the source index is
+            # `extent == 1 ? 0 : index`, a select LLVM hoists (it was a
+            # division, `index % extent`, per element and dimension).
+            dest_indices = loop_indexer.begin_loops()
+            # No need to check for wraparound, as the indexers all ensure
+            # a positive index is returned.
+            dest_ptr = cgutils.get_item_pointer2(
+                context, builder, dest_data, dest_shapes, dest_strides,
+                aryty.layout, dest_indices, wraparound=False,
+                boundscheck=context.enable_boundscheck)
+            src_indices = loop_indexer.get_src_indices()[-len(src_shapes):]
+            zero = context.get_constant(types.intp, 0)
+            src_indices = ([zero] * (len(src_shapes) - len(src_indices))
+                           + list(src_indices))
+            src_indices = [
+                builder.select(builder.icmp_unsigned('==', extent, one),
+                               zero, index)
+                for index, extent in zip(src_indices, src_shapes)
+            ]
+            src_ptr = cgutils.get_item_pointer2(
+                context, builder, data, src_shapes, strides, layout,
+                src_indices, wraparound=False)
+            val = load_item(context, builder, srcty, src_ptr)
+            val = context.cast(builder, val, src_dtype, aryty.dtype)
+            store_item(context, builder, aryty, val, dest_ptr)
+            loop_indexer.end_loops()
 
-        # No need to check for wraparound, as the indexers all ensure
-        # a positive index is returned.
-        dest_ptr = cgutils.get_item_pointer2(
-            context, builder, dest_data, dest_shapes, dest_strides,
-            aryty.layout, dest_indices, wraparound=False,
-            boundscheck=context.enable_boundscheck)
-
-        val = src_getitem()
-        val = context.cast(builder, val, src_dtype, aryty.dtype)
-        store_item(context, builder, aryty, val, dest_ptr)
-
-        indexer.end_loops()
-        src_cleanup()
+        # Two loops rather than one reading through a pointer that is either
+        # the source or its copy: alias analysis sees the source itself in
+        # the common, disjoint case.
+        with builder.if_else(use_copy, likely=False) as (overlapping, disjoint):
+            with overlapping:
+                # Overlapping storage: copy the source first, as NumPy does.
+                copy = copy_to_contiguous(context, builder, srcty, src,
+                                          src_shapes, src_strides, src_data)
+                copy_indexer = FancyIndexer(context, builder, aryty, ary,
+                                            index_types, indices,
+                                            subspace_shape_tuple)
+                copy_indexer.prepare()
+                assign_from(copy_indexer, copy, 'C', None)
+                context.nrt.free(builder, builder.bitcast(
+                    copy, cgutils.voidptr_t))
+            with disjoint:
+                assign_from(indexer, src_data, srcty.layout, src_strides)
 
     elif isinstance(srcty, types.Sequence):
         src_dtype = srcty.dtype
