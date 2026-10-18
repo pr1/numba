@@ -67,7 +67,8 @@ class ParallelOptions(AbstractOptionValue):
     Options for controlling auto parallelization.
     """
     __slots__ = ("enabled", "comprehension", "reduction", "inplace_binop",
-                 "setitem", "numpy", "stencil", "fusion", "prange")
+                 "setitem", "numpy", "stencil", "fusion", "prange",
+                 "sequential")
 
     def __init__(self, value):
         if isinstance(value, bool):
@@ -80,6 +81,7 @@ class ParallelOptions(AbstractOptionValue):
             self.stencil = value
             self.fusion = value
             self.prange = value
+            self.sequential = False
         elif isinstance(value, dict):
             self.enabled = True
             self.comprehension = value.pop('comprehension', True)
@@ -90,6 +92,9 @@ class ParallelOptions(AbstractOptionValue):
             self.stencil = value.pop('stencil', True)
             self.fusion = value.pop('fusion', True)
             self.prange = value.pop('prange', True)
+            # Lower the parfors as plain loops in this function: the
+            # transformations without threads.
+            self.sequential = value.pop('sequential', False)
             if value:
                 msg = "Unrecognized parallel options: %s" % value.keys()
                 raise NameError(msg)
@@ -103,6 +108,7 @@ class ParallelOptions(AbstractOptionValue):
             self.stencil = value.stencil
             self.fusion = value.fusion
             self.prange = value.prange
+            self.sequential = value.sequential
         else:
             msg = "Expect parallel option to be either a bool or a dict"
             raise ValueError(msg)

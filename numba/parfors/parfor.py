@@ -3196,7 +3196,7 @@ class ParforPreLoweringPass(ParforPassStates):
         if self.func_ir.is_generator:
             fix_generator_types(self.func_ir.generator_info, self.return_type,
                                 self.typemap)
-        if sequential_parfor_lowering:
+        if sequential_parfor_lowering or self.options.sequential:
             lower_parfor_sequential(
                 self.typingctx, self.func_ir, self.typemap, self.calltypes, self.metadata)
         else:

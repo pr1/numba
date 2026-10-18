@@ -2727,6 +2727,25 @@ class TestParforsSlice(TestParforsBase):
 
         self.check(test_impl, np.arange(12.0).reshape(4, 3), np.arange(3.0))
 
+    def test_parfor_sequential_option(self):
+        # parallel={'sequential': True} lowers the parfors as plain loops in
+        # the function: fused and allocation-free, without the threading
+        # layer.
+        def test_impl(out, x, h):
+            for b in range(1, out.shape[0]):
+                out[b] = out[b - 1] + x[b, :, None] * h
+            return out
+
+        args = (np.ones((5, 2, 4)), np.arange(10.0).reshape(5, 2),
+                np.arange(8.0).reshape(2, 4))
+        expected = test_impl(*[np.copy(a) for a in args])
+        cfunc = njit(parallel={'sequential': True})(test_impl)
+        np.testing.assert_array_equal(cfunc(*[np.copy(a) for a in args]),
+                                      expected)
+        llvm_ir = cfunc.inspect_llvm(cfunc.signatures[0])
+        for name in ("numba_parallel_for", "do_scheduling", "get_num_threads"):
+            self.assertNotIn(name, llvm_ir)
+
     def test_parfor_slice23(self):
         # issue #4630
         def test_impl(x):
