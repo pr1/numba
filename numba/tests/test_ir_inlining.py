@@ -1240,6 +1240,28 @@ class TestOverloadMethsAttrsInlining(InliningBase):
             block_count=1,
         )
 
+    def test_overload_method_bound_by_getattr(self):
+        # a method bound by the builtin getattr(obj, name), name a constant,
+        # inlines as obj.name does
+        Dummy, DummyType = self.make_dummy_type()
+
+        @overload_method(DummyType, "inline_method", inline='always')
+        def _get_inlined_method(obj, val):
+            return lambda obj, val: ("THIS IS INLINED", val)
+
+        name = "inline_method"
+
+        def foo(obj):
+            return getattr(obj, name)(123)
+
+        j_func = njit(pipeline_class=IRPreservingTestPipeline)(foo)
+        self.assertEqual(j_func(Dummy()), ("THIS IS INLINED", 123))
+        fir = j_func.overloads[j_func.signatures[0]].metadata['preserved_ir']
+        calls = [expr for block in fir.blocks.values()
+                 for expr in block.find_exprs('call')]
+        self.assertFalse([expr for expr in calls
+                          if fir.get_definition(expr.func).name != 'getattr'])
+
     def make_overload_method_test(self, costmodel, should_inline):
         def costmodel(*args):
             return should_inline
