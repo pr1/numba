@@ -744,9 +744,10 @@ def find_potential_aliases(blocks, args, typemap, func_ir, alias_map=None,
                                  expr.index)
                 if item is not None:
                     _add_alias(lhs, item.name, alias_map, arg_aliases)
-                # subarrays like A = B[0] for 2D B
+                # subarrays like A = B[0] for 2D B, and B unpacked
                 elif (isinstance(expr, ir.Expr) and (expr.op == 'cast' or
-                    expr.op in ['getitem', 'static_getitem'])):
+                    expr.op in ['getitem', 'static_getitem',
+                                'exhaust_iter'])):
                     _add_alias(lhs, expr.value.name, alias_map, arg_aliases)
                 if isinstance(expr, ir.Expr) and expr.op == 'inplace_binop':
                     _add_alias(lhs, expr.lhs.name, alias_map, arg_aliases)
@@ -790,13 +791,15 @@ def find_potential_aliases(blocks, args, typemap, func_ir, alias_map=None,
 
 def _tuple_item(func_ir, typemap, tup, index):
     """The variable put at `index` of the tuple `tup`, where its definition
-    shows it: built, summed, or converted by tuple(). An item taken out
-    aliases that variable; a tuple aliasing its items would make them all
+    shows it: built, summed, converted by tuple(), or unpacked. An item taken
+    out aliases that variable; a tuple aliasing its items would make them all
     aliases of each other."""
     definition = get_definition(func_ir, tup)
     require(isinstance(definition, ir.Expr))
     if definition.op == 'build_tuple':
         return definition.items[index]
+    if definition.op == 'exhaust_iter':
+        return _tuple_item(func_ir, typemap, definition.value, index)
     if definition.op == 'binop' and definition.fn == operator.add:
         lhs_type = typemap.get(definition.lhs.name) if typemap else None
         require(isinstance(lhs_type, types.BaseTuple))

@@ -155,6 +155,33 @@ class TestRemoveDead(TestCase):
                 njit(func)(A, 1)
                 self.assertEqual(A[1], 3)
 
+    @skip_parfors_unsupported
+    def test_alias_unpacked_tuple_item(self):
+        # a parfor writing into an array unpacked from a tuple is kept: the
+        # array aliases the item put in where the tuple's making shows it,
+        # else the tuple
+        def views(A):
+            pass
+
+        @overload(views, inline='always')
+        def ol_views(A):
+            return lambda A: (A[0], A[1])
+
+        def inlined(A):
+            B, C = views(A)
+            B[:] = 3
+
+        def argument(t):
+            B, C = t
+            B[:] = 3
+
+        for func, make in ((inlined, lambda A: A),
+                           (argument, lambda A: (A[0], A[1]))):
+            with self.subTest(func.__name__):
+                A = np.zeros((2, 3))
+                njit(parallel=True)(func)(make(A))
+                np.testing.assert_array_equal(A, [[3, 3, 3], [0, 0, 0]])
+
     def test_alias_flat(self):
         def func(A, i):
             B = A.flat
