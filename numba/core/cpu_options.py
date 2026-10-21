@@ -83,6 +83,9 @@ class ParallelOptions(AbstractOptionValue):
             self.prange = value
             self.sequential = False
         elif isinstance(value, dict):
+            # Parse a copy: the dict is the caller's, and a dispatcher parses
+            # it again for every signature it compiles.
+            value = value.copy()
             self.enabled = True
             self.comprehension = value.pop('comprehension', True)
             self.reduction = value.pop('reduction', True)

@@ -2870,6 +2870,25 @@ class TestParforsOptions(TestParforsBase):
                          comprehension=False, setitem=False, prange=False,
                          reduction=False, numpy=False), 0)
 
+    def test_parfor_options_every_signature(self):
+        # A dispatcher parses its parallel options again for every signature
+        # it compiles: its second signature lowers its parfors sequentially
+        # too, and the caller's dict is left as it was.
+        def test_impl(a):
+            return a + 1
+
+        options = {'sequential': True}
+        cfunc = njit(parallel=options)(test_impl)
+        cfunc(np.ones(4))
+        cfunc(np.arange(4))
+        self.assertEqual(options, {'sequential': True})
+        self.assertEqual(len(cfunc.signatures), 2)
+        for sig in cfunc.signatures:
+            llvm_ir = cfunc.inspect_llvm(sig)
+            for name in ("numba_parallel_for", "do_scheduling",
+                         "get_num_threads"):
+                self.assertNotIn(name, llvm_ir)
+
 
 @skip_parfors_unsupported
 class TestParforsBitMask(TestParforsBase):
