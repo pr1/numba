@@ -121,7 +121,7 @@ def _lower_parfor_parallel_std(lowerer, parfor):
             lowerer._alloca_var(rv.name, rvtyp)
 
     alias_map = {}
-    arg_aliases = {}
+    arg_aliases = set()
     numba.parfors.parfor.find_potential_aliases_parfor(parfor, parfor.params, typemap,
                                         lowerer.func_ir, alias_map, arg_aliases)
     if config.DEBUG_ARRAY_OPT:

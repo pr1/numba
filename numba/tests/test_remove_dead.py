@@ -182,6 +182,30 @@ class TestRemoveDead(TestCase):
                 njit(parallel=True)(func)(make(A))
                 np.testing.assert_array_equal(A, [[3, 3, 3], [0, 0, 0]])
 
+    def test_alias_of_arg_alias_after_inlining(self):
+        # a write through an alias of an array the inlined function made of
+        # an argument is kept, though the block after the call comes first
+        def views(A):
+            pass
+
+        @overload(views, inline='always')
+        def ol_views(A):
+            return lambda A: (A[0], A[1])
+
+        def indexed(A, i):
+            t = views(A)
+            t[0][i] = 3
+
+        def unpacked(A, i):
+            B, C = views(A)
+            B[i] = 3
+
+        for func in (indexed, unpacked):
+            with self.subTest(func.__name__):
+                A = np.zeros((2, 3))
+                njit(func)(A, 1)
+                self.assertEqual(A[0, 1], 3)
+
     def test_alias_flat(self):
         def func(A, i):
             B = A.flat
