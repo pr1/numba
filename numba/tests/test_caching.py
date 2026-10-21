@@ -7,6 +7,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import unittest
@@ -25,6 +26,7 @@ from numba.core.caching import (
     FunctionCache,
     InTreeCacheLocator,
     InTreeCacheLocatorFsAgnostic,
+    IndexDataCacheFile,
 )
 from numba.core.errors import NumbaWarning, NumbaDeprecationWarning
 from numba.parfors import parfor
@@ -1125,6 +1127,56 @@ def cache_file_collision_tester(q, tempdir, modname_bar1, modname_bar2):
         r2 = bar2()
     q.put(buf.getvalue())
     q.put(r2)
+
+
+def _lock_waiters():
+    # The processes with a thread waiting on a file lock, as Linux lists them
+    # in /proc/locks ("1: -> FLOCK  ADVISORY  WRITE <pid> ...")
+    with open('/proc/locks') as f:
+        lines = [line.split() for line in f]
+    return {int(fields[5]) for fields in lines if fields[1] == '->'}
+
+
+@unittest.skipUnless(os.path.exists('/proc/locks'), 'needs /proc/locks')
+class TestIndexDataCacheFile(TestCase):
+
+    def setUp(self):
+        self.tempdir = temp_directory('test_index_data_cache_file')
+
+    def cache_file(self, stamp='stamp'):
+        return IndexDataCacheFile(self.tempdir, 'f', stamp)
+
+    def test_save_concurrent(self):
+        # Two savers of one index, the second saving while the first is
+        # between loading the index and writing it. The second must wait:
+        # else both choose a data file name from the same index, and one's
+        # key names the other's data. An entry of an older source stamp
+        # left data in the first data file, which a new entry may name only
+        # once its own data is written.
+        self.cache_file('old').save('old', 'old data')
+        first, second, reader = [self.cache_file() for _ in range(3)]
+        load_index, save_data = first._load_index, first._save_data
+        saving = threading.Thread(target=second.save, args=('b', 'b data'))
+
+        def load_index_and_save_second():
+            overloads = load_index()
+            saving.start()
+            # Until the second has saved, or waits on a lock
+            while saving.is_alive() and os.getpid() not in _lock_waiters():
+                time.sleep(0.001)
+            return overloads
+
+        def check_and_save_data(name, data):
+            # A reader finds the first's data for 'a', or nothing
+            self.assertIn(reader.load('a'), (None, 'a data'))
+            save_data(name, data)
+
+        first._load_index = load_index_and_save_second
+        first._save_data = check_and_save_data
+        first.save('a', 'a data')
+        saving.join()
+        self.assertEqual(reader.load('a'), 'a data')
+        self.assertEqual(reader.load('b'), 'b data')
 
 
 class TestCacheMultipleFilesWithSignature(unittest.TestCase):

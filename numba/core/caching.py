@@ -6,6 +6,7 @@ Caching mechanism for compiled functions.
 from abc import ABCMeta, abstractmethod
 import contextlib
 import errno
+import fcntl
 import functools
 import hashlib
 import importlib
@@ -578,20 +579,29 @@ class IndexDataCacheFile(object):
         """
         Save a new cache entry with *key* and *data*.
         """
-        overloads = self._load_index()
-        try:
-            # If key already exists, we will overwrite the file
-            data_name = overloads[key]
-        except KeyError:
-            # Find an available name for the data file
-            existing = set(overloads.values())
-            for i in itertools.count(1):
-                data_name = self._data_name(i)
-                if data_name not in existing:
-                    break
-            overloads[key] = data_name
-            self._save_index(overloads)
-        self._save_data(data_name, data)
+        # Hold the cache directory from loading the index until it is
+        # written: two processes saving into one index would otherwise
+        # choose a data file name from the same index, and one's key would
+        # name the other's data.
+        with self._lock():
+            overloads = self._load_index()
+            try:
+                # If key already exists, we will overwrite the file
+                data_name = overloads[key]
+            except KeyError:
+                # Find an available name for the data file
+                existing = set(overloads.values())
+                for i in itertools.count(1):
+                    data_name = self._data_name(i)
+                    if data_name not in existing:
+                        break
+                overloads[key] = data_name
+                # Write the data before the index names it: the file may
+                # hold another entry's stale data.
+                self._save_data(data_name, data)
+                self._save_index(overloads)
+            else:
+                self._save_data(data_name, data)
 
     def load(self, key):
         """
@@ -663,6 +673,18 @@ class IndexDataCacheFile(object):
 
     def _dump(self, obj):
         return dumps(obj)
+
+    @contextlib.contextmanager
+    def _lock(self):
+        """
+        Hold an exclusive lock on the cache directory, across processes.
+        """
+        fd = os.open(self._cache_path, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
 
     @contextlib.contextmanager
     def _open_for_write(self, filepath):
