@@ -206,6 +206,46 @@ class TestRemoveDead(TestCase):
                 njit(func)(A, 1)
                 self.assertEqual(A[0, 1], 3)
 
+    @skip_parfors_unsupported
+    def test_alias_call_result(self):
+        # a parfor writing into an array a call returned is kept: the result
+        # of a call not known to allocate aliases the arrays it takes,
+        # positional, keyword, in a tuple, or a method's object
+        @njit
+        def view(A, B=None):
+            return (A if B is None else B)[1:]
+
+        @njit
+        def views(t):
+            return t[0][1:], t[1][1:]
+
+        def positional(A):
+            B = view(A)
+            B[:] = 3
+
+        def keyword(A):
+            B = view(A, B=A)
+            B[:] = 3
+
+        def in_tuple(A):
+            B, C = views((A, A))
+            B[:] = 3
+
+        def in_sum(A, t):
+            B, C = views((np.zeros(4),) + t)
+            C[:] = 3
+
+        def method(A):
+            B = A.view(np.float64)[1:]
+            B[:] = 3
+
+        for func in (positional, keyword, in_tuple, in_sum, method):
+            with self.subTest(func.__name__):
+                A = np.zeros(4)
+                args = (A, (A,)) if func is in_sum else (A,)
+                njit(parallel=True)(func)(*args)
+                np.testing.assert_array_equal(A, [0, 3, 3, 3])
+
     def test_alias_flat(self):
         def func(A, i):
             B = A.flat

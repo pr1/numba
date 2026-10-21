@@ -751,6 +751,12 @@ def find_potential_aliases(blocks, args, typemap, func_ir, alias_map=None,
                     _add_alias(lhs, expr.value.name, alias_map, arg_aliases)
                 if isinstance(expr, ir.Expr) and expr.op == 'inplace_binop':
                     _add_alias(lhs, expr.lhs.name, alias_map, arg_aliases)
+                # a sum of tuples aliases them, as an unpacked tuple does
+                if (isinstance(expr, ir.Expr) and expr.op == 'binop'
+                        and expr.fn == operator.add and typemap
+                        and isinstance(typemap.get(lhs), types.BaseTuple)):
+                    _add_alias(lhs, expr.lhs.name, alias_map, arg_aliases)
+                    _add_alias(lhs, expr.rhs.name, alias_map, arg_aliases)
                 # array attributes like A.T
                 if (isinstance(expr, ir.Expr) and expr.op == 'getattr'
                         and expr.attr in ['T', 'ctypes', 'flat']):
@@ -763,20 +769,22 @@ def find_potential_aliases(blocks, args, typemap, func_ir, alias_map=None,
                 # calls that can create aliases such as B = A.ravel()
                 if isinstance(expr, ir.Expr) and expr.op == 'call':
                     fdef = guard(find_callname, func_ir, expr, typemap)
-                    # TODO: sometimes gufunc backend creates duplicate code
-                    # causing find_callname to fail. Example: test_argmax
-                    # ignored here since those cases don't create aliases
-                    # but should be fixed in general
-                    if fdef is None:
-                        continue
-                    fname, fmod = fdef
+                    fname, fmod = fdef if fdef is not None else (None, None)
                     if fdef in alias_func_extensions:
                         alias_func = alias_func_extensions[fdef]
                         alias_func(lhs, expr.args, alias_map, arg_aliases)
-                    if fmod == 'numpy' and fname in np_alias_funcs:
+                    elif fmod == 'numpy' and fname in np_alias_funcs:
                         _add_alias(lhs, expr.args[0].name, alias_map, arg_aliases)
-                    if isinstance(fmod, ir.Var) and fname in np_alias_funcs:
+                    elif isinstance(fmod, ir.Var) and fname in np_alias_funcs:
                         _add_alias(lhs, fmod.name, alias_map, arg_aliases)
+                    elif fdef == ('tuple', 'builtins') and len(expr.args) == 1:
+                        # the items of its argument: b = tuple(a) aliases a
+                        _add_alias(lhs, expr.args[0].name, alias_map, arg_aliases)
+                    elif (_holds_array(typemap.get(lhs) if typemap else None)
+                            and not _allocates(fdef)):
+                        # any other call may return its arrays or views of them
+                        for name in _call_arrays(func_ir, typemap, expr, fmod):
+                            _add_alias(lhs, name, alias_map, arg_aliases)
 
     # copy to avoid changing size during iteration
     old_alias_map = copy.deepcopy(alias_map)
@@ -814,6 +822,59 @@ def _tuple_item(func_ir, typemap, tup, index):
     require(definition.op == 'call' and len(definition.args) == 1
             and find_callname(func_ir, definition) == ('tuple', 'builtins'))
     return _tuple_item(func_ir, typemap, definition.args[0], index)
+
+
+def _holds_array(typ):
+    """Whether a value of type `typ` is or holds an array: an array, or a
+    tuple or list of them. An unknown type may."""
+    if typ is None:
+        return True
+    if isinstance(typ, types.Optional):
+        return _holds_array(typ.type)
+    if isinstance(typ, types.BaseTuple):
+        return any(_holds_array(t) for t in typ)
+    if isinstance(typ, (types.List, types.ListType)):
+        return _holds_array(typ.dtype)
+    return isinstance(typ, types.Array)
+
+
+def _allocates(fdef):
+    """Whether a call to `fdef`, as find_callname names it, returns a new
+    array: NumPy's array creation and random draws, and empty_inferred."""
+    from numba.parfors import array_analysis
+    if fdef is None:
+        return False
+    fname, fmod = fdef
+    return ((fmod == 'numpy' and fname in array_analysis.array_creation)
+            or (fmod == 'numpy.random' and fname in array_analysis.random_calls)
+            or fdef == ('empty_inferred', 'numba.np.unsafe.ndarray'))
+
+
+def _call_arrays(func_ir, typemap, expr, fmod):
+    """The variables holding arrays a call takes, positional, keyword or
+    starred, and a method's object `fmod`: the arrays a tuple was built of
+    where its making shows them, else the tuple."""
+    args = [*expr.args, *(var for _, var in expr.kws)]
+    if expr.vararg is not None:
+        args.append(expr.vararg)
+    if isinstance(fmod, ir.Var):
+        args.append(fmod)
+    names = []
+    while args:
+        var = args.pop()
+        typ = typemap.get(var.name) if typemap else None
+        if not isinstance(typ, types.BaseTuple):
+            if _holds_array(typ):
+                names.append(var.name)
+            continue
+        for i, item_type in enumerate(typ):
+            if _holds_array(item_type):
+                item = guard(_tuple_item, func_ir, typemap, var, i)
+                if item is None:
+                    names.append(var.name)
+                else:
+                    args.append(item)
+    return names
 
 
 def _add_alias(lhs, rhs, alias_map, arg_aliases):
