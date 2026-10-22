@@ -325,7 +325,9 @@ class ParforPass(FunctionPass):
                 continue
             break
 
-        if not has_parfor:
+        # sequential parfors ask for the transformations where they apply, and
+        # no threads: nothing to transform is nothing to warn of
+        if not has_parfor and not state.flags.auto_parallel.sequential:
             # parfor calls the compiler chain again with a string
             if not (config.DISABLE_PERFORMANCE_WARNINGS or
                     state.func_ir.loc.filename == '<string>'):

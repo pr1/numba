@@ -2968,6 +2968,22 @@ class TestParforsOptions(TestParforsBase):
                          comprehension=False, setitem=False, prange=False,
                          reduction=False, numpy=False), 0)
 
+    def test_parfor_sequential_nothing_to_transform(self):
+        # A function compiled with parallel={'sequential': True} and nothing
+        # to transform isn't warned of: sequential parfors ask for the
+        # transformations where they apply, not for threads.
+        def test_impl(x):
+            return x + 1
+
+        for parallel, warned in ((True, True), ({'sequential': True}, False)):
+            with self.subTest(parallel=parallel):
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter('always',
+                                          errors.NumbaPerformanceWarning)
+                    njit(parallel=parallel)(test_impl)(1.0)
+                self.assertEqual(any("parallel=True" in str(w.message)
+                                     for w in caught), warned)
+
     def test_parfor_options_every_signature(self):
         # A dispatcher parses its parallel options again for every signature
         # it compiles: its second signature lowers its parfors sequentially
