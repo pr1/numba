@@ -2835,6 +2835,23 @@ class TestParforsSlice(TestParforsBase):
         self.assertEqual(countParfors(test_impl, argtys), 1)
         self.assertEqual(countArrayAllocs(test_impl, argtys), 0)
 
+    def test_parfor_namedtuple_field_shapes(self):
+        # Two namedtuples a call that isn't inlined takes keep their fields'
+        # shapes: array analysis takes a field's shape by its owner's alias
+        # class.
+        NT = namedtuple('NT', ['a'])
+
+        @njit
+        def first(p, q):
+            return p
+
+        def test_impl():
+            p, q = NT(np.ones(1)), NT(np.ones(4))
+            first(p, q)
+            return np.array([p.a.sum(), q.a.sum()])
+
+        self.check(test_impl)
+
     def test_parfor_slice23(self):
         # issue #4630
         def test_impl(x):
