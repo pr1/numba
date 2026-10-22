@@ -5,11 +5,12 @@
 
 import numba
 import numba.parfors.parfor
-from numba import njit, jit
+from numba import njit, jit, literal_unroll
 from numba.core.extending import overload
 from numba.core import ir_utils
 from numba.core import types, ir,  compiler
 from numba.core.registry import cpu_target
+from numba.typed import List
 from numba.core.ir_utils import (copy_propagate, apply_copy_propagate,
                             get_name_var_table, remove_dels, remove_dead,
                             remove_call_handlers, alias_func_extensions)
@@ -245,6 +246,81 @@ class TestRemoveDead(TestCase):
                 args = (A, (A,)) if func is in_sum else (A,)
                 njit(parallel=True)(func)(*args)
                 np.testing.assert_array_equal(A, [0, 3, 3, 3])
+
+    @skip_parfors_unsupported
+    def test_alias_unanalyzed_write(self):
+        # writes into arrays the alias analysis can't trace to their storage
+        # are kept: dead code removal drops a write only into a private
+        # temporary, an array the function allocated and uses element by
+        # element
+        def row(A, i):
+            return A[i]
+
+        @overload(row, inline='always')
+        def ol_row(A, i):
+            return lambda A, i: A[i]
+
+        def iterated(A):
+            for r in A:
+                r[:] = 3
+
+        def enumerated(A):
+            for i, r in enumerate(A):
+                r[:] = 3
+
+        def variable_index(A, i):
+            t = (A[0], A[1])
+            t[i][:] = 3
+
+        def listed(A):
+            L = [A[0], A[1]]
+            L[0][:] = 3
+
+        def typed_list(A):
+            L = List()
+            L.append(A[0])
+            L.append(A[1])
+            L[0][:] = 3
+
+        def unrolled(A):
+            for r in literal_unroll((A[0], A[1][:2])):
+                r[:] = 3
+
+        def branches(A, c):
+            if c:
+                t = (A[0], A[1])
+            else:
+                t = (A[1], A[0])
+            t[0][:] = 3
+
+        def real_of_local(A):
+            Z = np.zeros(3, np.complex128)
+            Z.real[:] = 3
+            A[0] = Z.real
+
+        def local_tuple(A):
+            t = (np.zeros(3), np.zeros(3))
+            t[0][:] = 3
+            return t
+
+        def view_of_local(A, i):
+            Z = np.zeros((2, 3))
+            s = row(Z, 0)[0:]
+            s[i] = 3
+            A[0] = Z[0]
+
+        for func, args in ((iterated, ()), (enumerated, ()),
+                           (variable_index, (0,)), (listed, ()),
+                           (typed_list, ()), (unrolled, ()),
+                           (branches, (True,)), (real_of_local, ()),
+                           (local_tuple, ()), (view_of_local, (1,))):
+            with self.subTest(func.__name__):
+                expected_A = np.zeros((2, 3))
+                expected = func(expected_A, *args)
+                A = np.zeros((2, 3))
+                got = njit(parallel=True)(func)(A, *args)
+                np.testing.assert_array_equal(A, expected_A)
+                np.testing.assert_array_equal(got, expected)
 
     def test_alias_flat(self):
         def func(A, i):

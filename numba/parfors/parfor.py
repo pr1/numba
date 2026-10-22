@@ -78,6 +78,8 @@ from numba.core.ir_utils import (
     index_var_of_get_setitem,
     set_index_var_of_get_setitem,
     find_potential_aliases,
+    find_shared,
+    is_allocation,
     replace_var_names,
     transfer_scope,
 )
@@ -4236,6 +4238,7 @@ def maximize_fusion(func_ir, blocks, typemap, up_direction=True):
                                  typemap,
                                  func_ir
                              )
+    shared = find_shared(blocks, typemap, call_table)
     for block in blocks.values():
         order_changed = True
         while order_changed:
@@ -4245,11 +4248,12 @@ def maximize_fusion(func_ir, blocks, typemap, up_direction=True):
                                 call_table,
                                 alias_map,
                                 arg_aliases,
+                                shared,
                                 up_direction
                             )
 
 def maximize_fusion_inner(func_ir, block, call_table, alias_map,
-                          arg_aliases, up_direction=True):
+                          arg_aliases, shared, up_direction=True):
     order_changed = False
     i = 0
     # i goes to body[-3] (i+1 to body[-2]) since body[-1] is terminator and
@@ -4258,9 +4262,10 @@ def maximize_fusion_inner(func_ir, block, call_table, alias_map,
         stmt = block.body[i]
         next_stmt = block.body[i+1]
         can_reorder = (_can_reorder_stmts(stmt, next_stmt, func_ir,
-                                          call_table, alias_map, arg_aliases)
+                                          call_table, alias_map, arg_aliases,
+                                          shared)
                         if up_direction else _can_reorder_stmts(next_stmt, stmt,
-                        func_ir, call_table, alias_map, arg_aliases))
+                        func_ir, call_table, alias_map, arg_aliases, shared))
         if can_reorder:
             block.body[i] = next_stmt
             block.body[i+1] = stmt
@@ -4279,10 +4284,11 @@ def expand_aliases(the_set, alias_map, arg_aliases):
     return ret
 
 def _can_reorder_stmts(stmt, next_stmt, func_ir, call_table,
-                       alias_map, arg_aliases):
+                       alias_map, arg_aliases, shared):
     """
     Check dependencies to determine if a parfor can be reordered in the IR block
-    with a non-parfor statement.
+    with a non-parfor statement. Variables in `shared` (find_shared) may be any
+    storage.
     """
     # swap only parfors with non-parfors
     # don't reorder calls with side effects (e.g. file close)
@@ -4302,10 +4308,54 @@ def _can_reorder_stmts(stmt, next_stmt, func_ir, call_table,
                                        alias_map, arg_aliases)
         next_writes = expand_aliases(get_stmt_writes(next_stmt),
                                      alias_map, arg_aliases)
-        if len((stmt_writes & next_accesses)
-                | (next_writes & stmt_accesses)) == 0:
+        if (len((stmt_writes & next_accesses)
+                | (next_writes & stmt_accesses)) == 0
+                and not _shares_storage(stmt, next_stmt, func_ir, call_table,
+                                        shared)):
             return True
     return False
+
+def _shares_storage(parfor, stmt, func_ir, call_table, shared):
+    """Whether a parfor or a statement may write storage the other touches,
+    taking every variable in `shared` for any storage: the alias analysis is
+    approximate. Making a view, or taking an array out of a struct or tuple,
+    touches storage: once past it, the parfor could fuse with one that reads
+    the array at other indices.
+    """
+    def writes(stmt):
+        # into shared storage: a setitem, a setattr, an in-place operator, or a
+        # call that may have side effects taking it
+        if isinstance(stmt, (ir.SetItem, ir.StaticSetItem)):
+            return stmt.target.name in shared
+        if isinstance(stmt, ir.SetAttr):
+            return True
+        value = stmt.value if isinstance(stmt, ir.Assign) else None
+        if not isinstance(value, ir.Expr):
+            return False
+        if value.op == 'inplace_binop':
+            return value.lhs.name in shared
+        return (value.op == 'call'
+                and not has_no_side_effect(value, set(), call_table)
+                and not guard(is_assert_equiv, func_ir, value)
+                and any(v.name in shared for v in value.list_vars()))
+
+    # what the statement reads, or makes a reference to; a new array isn't
+    # storage the parfor can touch
+    touched = (stmt.value.list_vars() if isinstance(stmt, ir.Assign)
+               and is_allocation(stmt.value, call_table) else stmt.list_vars())
+    return (any(v.name in shared for v in touched)
+            and any(writes(s) for s in _parfor_stmts(parfor))
+            or writes(stmt)
+            and any(v.name in shared for v in parfor.list_vars()))
+
+def _parfor_stmts(parfor):
+    """The statements of a parfor and of the parfors nested in it."""
+    for block in (parfor.init_block, *parfor.loop_body.values()):
+        for stmt in block.body:
+            if isinstance(stmt, Parfor):
+                yield from _parfor_stmts(stmt)
+            else:
+                yield stmt
 
 def is_assert_equiv(func_ir, expr):
     func_name, mod_name = find_callname(func_ir, expr)

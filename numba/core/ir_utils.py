@@ -9,6 +9,7 @@ import operator
 
 import types as pytypes
 import collections
+import functools
 import warnings
 
 import numba
@@ -460,14 +461,12 @@ def remove_args(blocks):
     return
 
 
-def dead_code_elimination(func_ir, typemap=None, alias_map=None,
-                          arg_aliases=None):
+def dead_code_elimination(func_ir, typemap=None):
     """ Performs dead code elimination and leaves the IR in a valid state on
     exit
     """
     do_post_proc = False
-    while (remove_dead(func_ir.blocks, func_ir.arg_names, func_ir, typemap,
-                       alias_map, arg_aliases)):
+    while remove_dead(func_ir.blocks, func_ir.arg_names, func_ir, typemap):
         do_post_proc = True
 
     if do_post_proc:
@@ -478,6 +477,9 @@ def dead_code_elimination(func_ir, typemap=None, alias_map=None,
 def remove_dead(blocks, args, func_ir, typemap=None, alias_map=None, arg_aliases=None):
     """dead code elimination using liveness and CFG info.
     Returns True if something has been removed, or False if nothing is removed.
+    The alias analysis is approximate, so the argument aliases also hold every
+    variable that may share storage (find_shared), whose writes stay; a caller
+    passing arg_aliases passes ones that do.
     """
     cfg = compute_cfg_from_blocks(blocks)
     usedefs = compute_use_defs(blocks)
@@ -486,6 +488,7 @@ def remove_dead(blocks, args, func_ir, typemap=None, alias_map=None, arg_aliases
     if alias_map is None or arg_aliases is None:
         alias_map, arg_aliases = find_potential_aliases(blocks, args, typemap,
                                                         func_ir)
+        arg_aliases |= find_shared(blocks, typemap, call_table)
     if config.DEBUG_ARRAY_OPT >= 1:
         print("args:", args)
         print("alias map:", alias_map)
@@ -511,6 +514,111 @@ def remove_dead(blocks, args, func_ir, typemap=None, alias_map=None, arg_aliases
                                      alias_map, alias_set, func_ir, typemap)
 
     return removed
+
+
+def find_shared(blocks, typemap, call_table):
+    """The variables of `blocks` that may share storage: every array, and every
+    variable written through (setitem, in-place operator), but the private
+    temporaries. A private temporary is an array assigned once, by an allocating
+    call or an array expression, and then only set or read at an index (a read
+    that makes no view), its shape taken, or checked by array analysis: nothing
+    else can refer to its storage. Alias analysis is not trusted for the rest.
+    """
+    from numba.parfors.array_analysis import assert_equiv, wrap_index
+    from numba.parfors.parfor import Parfor
+    if typemap is None:
+        typemap = {}
+    names, assigned, reassigned, allocated, escaped, written = (
+        set(), set(), set(), set(), set(), set())
+    stack = list(blocks.values())
+    while stack:
+        for stmt in stack.pop().body:
+            if isinstance(stmt, Parfor):
+                stack.extend((stmt.init_block, *stmt.loop_body.values()))
+                continue
+            # the statement's variables: the ones used other than element by
+            # element, and the rest
+            if isinstance(stmt, (ir.SetItem, ir.StaticSetItem)):
+                written.add(stmt.target.name)
+                index = (stmt.index_var if isinstance(stmt, ir.StaticSetItem)
+                         else stmt.index)
+                used, rest = [index, stmt.value], [stmt.target]
+            elif isinstance(stmt, ir.Assign):
+                lhs, rhs = stmt.target.name, stmt.value
+                (reassigned if lhs in assigned else assigned).add(lhs)
+                rest = [stmt.target]
+                if isinstance(rhs, ir.Var):
+                    used = [rhs]
+                elif not isinstance(rhs, ir.Expr):
+                    used = rhs.list_vars() if isinstance(rhs, ir.Yield) else []
+                elif rhs.op in ('getitem', 'static_getitem'):
+                    # reading an element; a view or a record refers to storage
+                    index = rhs.index if rhs.op == 'getitem' else rhs.index_var
+                    used = [rhs.value, index]
+                    if isinstance(typemap.get(lhs), (types.Number,
+                                                     types.Boolean)):
+                        rest.append(used.pop(0))
+                elif (rhs.op == 'getattr' and rhs.attr in ('shape', 'ndim',
+                                                           'size', 'dtype')
+                        or rhs.op == 'call' and any(
+                            _callee(call_table.get(rhs.func.name)) is check
+                            for check in (assert_equiv, wrap_index))):
+                    used, rest = [], rest + rhs.list_vars()  # shapes only
+                else:
+                    used = rhs.list_vars()
+                    if rhs.op == 'inplace_binop':
+                        written.add(rhs.lhs.name)
+                    if (isinstance(typemap.get(lhs), types.Array)
+                            and is_allocation(rhs, call_table)):
+                        allocated.add(lhs)
+            elif isinstance(stmt, ir.Del):
+                continue
+            else:
+                used, rest = stmt.list_vars(), []
+            used = [v.name for v in used if v is not None]
+            escaped.update(used)
+            names.update(used)
+            names.update(v.name for v in rest if v is not None)
+
+    private = allocated - reassigned - escaped
+    return {name for name in names - private
+            if isinstance(typemap.get(name), types.ArrayCompatible)
+            or name in written and not is_immutable_type(name, typemap)}
+
+
+def is_allocation(expr, call_table):
+    """Whether an expression makes a new array: an array expression, or a call
+    to a function known to return one (_allocators)."""
+    if not isinstance(expr, ir.Expr):
+        return False
+    if expr.op == 'call':
+        callee = _callee(call_table.get(expr.func.name))
+        return any(callee is function for function in _allocators())
+    return expr.op == 'arrayexpr'
+
+
+@functools.cache
+def _allocators():
+    """The functions known to return a new array: NumPy's array creation and
+    random draws, as array analysis lists them, and empty_inferred."""
+    from numba.np.unsafe.ndarray import empty_inferred
+    from numba.parfors.array_analysis import array_creation, random_calls
+    return (empty_inferred, *(getattr(numpy, name) for name in array_creation),
+            *(getattr(numpy.random, name) for name in random_calls
+              if hasattr(numpy.random, name)))
+
+
+def _callee(call_list):
+    """The object a call table entry names, if a module's: ['zeros', numpy]
+    names numpy.zeros."""
+    if not call_list:
+        return None
+    *attrs, obj = call_list
+    for attr in reversed(attrs):
+        if not isinstance(obj, pytypes.ModuleType):
+            return None
+        obj = getattr(obj, attr, None)
+    return obj
 
 
 # other packages that define new nodes add calls to remove dead code in them

@@ -31,7 +31,7 @@ from numba.core import (types, errors, ir, rewrites,
                         typed_passes, inline_closurecall, config, compiler, cpu)
 from numba.typed import Dict, List
 
-from numba.extending import (overload_method, register_model,
+from numba.extending import (overload, overload_method, register_model,
                              typeof_impl, unbox, NativeValue, models)
 from numba.core.registry import cpu_target
 from numba.core.annotations import type_annotations
@@ -2753,6 +2753,87 @@ class TestParforsSlice(TestParforsBase):
             return a + b
 
         self.check(test_impl, np.ones((3, 2, 4)), np.arange(8.0).reshape(2, 4))
+
+    def test_parfor_reorder_past_unanalyzed_alias(self):
+        # A loop writing storage the alias analysis can't trace doesn't move
+        # past a statement reading it: there it would read too early, or fuse
+        # with a loop reading a view of the storage at other indices.
+        @njit
+        def shifted(X):
+            return X[1:]
+
+        def views(A):
+            return A[0], A[1]
+
+        @overload(views, inline='always')
+        def ol_views(A):
+            return lambda A: (A[0], A[1])
+
+        def fused_view(X, Y):
+            n = Y.shape[0]
+            V = shifted(X)
+            X[:n] = 1.0
+            Y[:] = V[:n] * 2
+
+        def unpacked(A, out):
+            B, C = views(A)
+            B[:] = 3
+            x = A[0, 1]
+            out[:] = x
+
+        def call(A, out):
+            B = shifted(A[0])
+            B[:] = 3
+            x = A[0, 1]
+            out[:] = x
+
+        def variable_index(A, out):
+            t = (A[0], A[1])
+            i = 0
+            for j in range(out.shape[0] - 4):
+                i += 1
+            t[i][:] = 3
+            x = A[0, 1]
+            out[:] = x
+
+        def listed(A, out):
+            L = [A[0], A[1]]
+            L[0][:] = 3
+            x = A[0, 1]
+            out[:] = x
+
+        def forwarded(A, out):
+            # B is Z: the fused loop's read of Z isn't Z[i] = 1
+            Z = np.zeros(4)
+            t = (Z, Z)
+            i = 0
+            for j in range(out.shape[0] - 4):
+                i += 1
+            B = t[i]
+            Z[:] = 1
+            B[:] = 3
+            out[:] = Z
+
+        args_equal = [np.testing.assert_array_equal] * 2
+        self.check(fused_view, np.zeros(9), np.zeros(8),
+                   check_arg_equality=args_equal)
+        for func in (unpacked, call, variable_index, listed, forwarded):
+            with self.subTest(func.__name__):
+                self.check(func, np.zeros((2, 3)), np.zeros(4),
+                           check_arg_equality=args_equal)
+
+    def test_parfor_private_temporary(self):
+        # A temporary the function allocates and uses element by element
+        # loses its writes once its loops fuse: no allocation is left.
+        def test_impl(out, x, y):
+            t = x * 2
+            out[:] = t + y
+            return out
+
+        self.check(test_impl, np.zeros(5), np.arange(5.0), np.ones(5))
+        argtys = (types.float64[::1],) * 3
+        self.assertEqual(countParfors(test_impl, argtys), 1)
+        self.assertEqual(countArrayAllocs(test_impl, argtys), 0)
 
     def test_parfor_slice23(self):
         # issue #4630
