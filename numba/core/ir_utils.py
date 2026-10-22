@@ -894,10 +894,6 @@ def find_potential_aliases(blocks, args, typemap, func_ir, alias_map=None,
             alias_map[v] |= alias_map[w]
         for w in old_alias_map[v]:
             alias_map[w] = alias_map[v]
-    # an alias of an argument alias is one, whatever the order of the blocks
-    for v in alias_map:
-        if alias_map[v] & arg_aliases:
-            arg_aliases |= alias_map[v]
 
     return alias_map, arg_aliases
 
