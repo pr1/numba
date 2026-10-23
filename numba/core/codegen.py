@@ -649,6 +649,9 @@ class CPUCodeLibrary(CodeLibrary):
             str(self._codegen._create_empty_module(self.name)))
         self._final_module.name = cgutils.normalize_ir_text(self.name)
         self._shared_module = None
+        # Names of the functions linked in from other libraries that remain
+        # in the final module (see finalize())
+        self._linked_functions = []
 
     def _optimize_functions(self, ll_module):
         """
@@ -693,9 +696,9 @@ class CPUCodeLibrary(CodeLibrary):
     def _get_module_for_linking(self):
         """
         Internal: get a LLVM module suitable for linking multiple times
-        into another library.  Exported functions are made "linkonce_odr"
-        to allow for multiple definitions, inlining, and removal of
-        unused exports.
+        into another library.  Exported functions, and the functions linked
+        in from other libraries, are made "linkonce_odr" to allow for
+        multiple definitions, inlining, and removal of unused exports.
 
         See discussion in https://github.com/numba/numba/pull/890
         """
@@ -709,6 +712,7 @@ class CPUCodeLibrary(CodeLibrary):
             nfuncs += 1
             if not fn.is_declaration and fn.linkage == ll.Linkage.external:
                 to_fix.append(fn.name)
+        to_fix += self._linked_functions
         if nfuncs == 0:
             # This is an issue which can occur if loading a module
             # from an object file and trying to link with it, so detect it
@@ -759,18 +763,32 @@ class CPUCodeLibrary(CodeLibrary):
 
         # Link libraries for shared code
         seen = set()
+        linked = set()
         for library in self._linking_libraries:
             if library not in seen:
                 # Parent inherits reload_init
                 self._reload_init.update(library._reload_init)
                 seen.add(library)
-                self._final_module.link_in(
-                    library._get_module_for_linking(), preserve=True,
-                )
+                module = library._get_module_for_linking()
+                linked.update(fn.name for fn in module.functions
+                              if fn.linkage == ll.Linkage.linkonce_odr)
+                self._final_module.link_in(module, preserve=True)
 
         # Optimize the module after all dependences are linked in above,
         # to allow for inlining.
         self._optimize_final_module()
+
+        # What remains of the linked-in functions after optimization is this
+        # library's own copy, optimized with it, which need not match another
+        # library's definition of the same symbol bit for bit (e.g. under
+        # fastmath).  Make it internal to this library's code, so that its
+        # calls bind to it and not to whichever definition the JIT loaded
+        # first.  The module for linking keeps it linkonce_odr, as linked.
+        self._linked_functions = [
+            fn.name for fn in self._final_module.functions
+            if fn.linkage == ll.Linkage.linkonce_odr and fn.name in linked]
+        for name in self._linked_functions:
+            self._final_module.get_function(name).linkage = 'internal'
 
         self._final_module.verify()
         self._finalize_final_module()

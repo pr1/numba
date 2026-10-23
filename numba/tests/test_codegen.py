@@ -48,6 +48,33 @@ asm_sum_outer = """
 """    # noqa: E501
 
 
+# Two definitions of one symbol, kept out of line, that differ: as copies of a
+# function optimized in different libraries may (e.g. under fastmath)
+
+asm_inner_add = r"""
+    define i32 @inner(i32 %.1, i32 %.2) noinline {
+      %.3 = add i32 %.1, %.2
+      ret i32 %.3
+    }
+    """
+
+asm_inner_sub = r"""
+    define i32 @inner(i32 %.1, i32 %.2) noinline {
+      %.3 = sub i32 %.1, %.2
+      ret i32 %.3
+    }
+    """
+
+asm_inner_outer = r"""
+    declare i32 @inner(i32 %.1, i32 %.2)
+
+    define i32 @sum(i32 %.1, i32 %.2) {
+      %.3 = call i32 @inner(i32 %.1, i32 %.2)
+      ret i32 %.3
+    }
+    """
+
+
 ctypes_sum_ty = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_int)
 
 
@@ -104,6 +131,30 @@ class JITCPUCodegenTestCase(TestCase):
         self.assertIsInstance(ptr, int)
         cfunc = ctypes_sum_ty(ptr)
         self.assertEqual(cfunc(2, 3), 5)
+
+    def test_linked_function_is_own_copy(self):
+        # A function linked in from another library is the library's own
+        # copy: internal to its code, linkonce_odr again for linking it into
+        # other libraries
+        library = self.compile_module(asm_inner_outer, asm_inner_add)
+        library.enable_object_caching()
+        state = library.serialize_using_object_code()
+        self.assertEqual(library.get_function("inner").linkage,
+                         ll.Linkage.internal)
+        shared = library._get_module_for_linking()
+        self.assertEqual(shared.get_function("inner").linkage,
+                         ll.Linkage.linkonce_odr)
+
+        # Loaded from cache after another definition of the symbol, its
+        # calls still reach its copy
+        codegen = JITCPUCodegen('other_codegen')
+        other = codegen.create_library('other_module')
+        other.add_llvm_module(ll.parse_assembly(asm_inner_sub))
+        ptr = other.get_pointer_to_function("inner")
+        self.assertEqual(ctypes_sum_ty(ptr)(2, 3), -1)
+        cached = codegen.unserialize_library(state)
+        ptr = cached.get_pointer_to_function("sum")
+        self.assertEqual(ctypes_sum_ty(ptr)(2, 3), 5)
 
     def test_magic_tuple(self):
         tup = self.codegen.magic_tuple()
