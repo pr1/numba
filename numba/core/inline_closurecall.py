@@ -1,6 +1,7 @@
 import types as pytypes  # avoid confusion with numba.types
 import copy
 import ctypes
+import inspect
 import numba.core.analysis
 from numba.core import (types, typing, errors, ir, rewrites, config, ir_utils,
                         cgutils)
@@ -789,6 +790,12 @@ def _get_callee_args(call_expr, callee, loc, func_ir):
     else:
         # TODO: handle arguments for make_function case similar to function
         # case above
+        callee_code = (callee.code if hasattr(callee, 'code')
+                       else callee.__code__)
+        if callee_code.co_flags & inspect.CO_VARARGS:
+            # each argument would bind to the parameter of its position
+            msg = "Inlining a closure with a star parameter is unsupported."
+            raise errors.UnsupportedError(msg, loc)
         callee_defaults = (callee.defaults if hasattr(callee, 'defaults')
                            else callee.__defaults__)
         if callee_defaults:
