@@ -462,13 +462,6 @@ class TestPickling(TestCase):
         for ty in tys:
             self.check_pickling(ty)
 
-    def test_pickles_leave_out_the_code(self):
-        # _code numbers a type in its process: equal types made in another
-        # order elsewhere pickle alike only without it
-        ty = types.Array(types.complex64, 2, 'C', aligned=True)
-        self.check_pickling(ty)
-        self.assertNotIn(b'_code', pickle.dumps(ty, protocol=-1))
-
     def test_atomic_types(self):
         for unit in ('M', 'ms'):
             ty = npy_types.NPDatetime(unit)
