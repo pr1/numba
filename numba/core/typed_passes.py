@@ -22,7 +22,7 @@ from numba.core.annotations import type_annotations
 from numba.core.ir_utils import (raise_on_unsupported_feature, warn_deprecated,
                                  check_and_legalize_ir, guard,
                                  dead_code_elimination, simplify_CFG,
-                                 get_definition, find_callname,
+                                 get_definition,
                                  build_definitions, compute_cfg_from_blocks,
                                  is_operator_or_getitem,
                                  replace_vars)
@@ -853,15 +853,7 @@ class InlineOverloads(FunctionPass):
         func_def = guard(get_definition, state.func_ir, expr.func)
         if func_def is None:
             return False
-        if getattr(func_def, 'op', None) == 'call':
-            # a method bound by the builtin getattr(obj, name)
-            callname = guard(find_callname, state.func_ir, func_def)
-            if callname != ('getattr', 'builtins'):
-                return False
-            receiver = func_def.args[0]
-        else:
-            receiver = func_def.value
-        expr.args.insert(0, receiver)
+        expr.args.insert(0, func_def.value)
         return True
 
 
