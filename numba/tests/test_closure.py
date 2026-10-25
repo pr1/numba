@@ -380,23 +380,17 @@ class TestInlinedClosure(TestCase):
                 return x + np.cos(z)
             return inner(x)
 
-        def outer22(x):
-            """ closure called with *args of a tuple built in the block """
+        def outer22():
+            """Test to ensure that unsupported *args raises correctly"""
             def bar(a, b):
-                return a - b
-            t = x, 2
-            return bar(*t)
-
-        def outer23():
-            """Test to ensure that a closure with *args raises correctly"""
-            def bar(*a):
-                return a
-            return bar(1, 2)
+                pass
+            x = 1, 2
+            bar(*x)
 
         # functions to test that are expected to pass
         f = [outer1, outer2, outer5, outer6, outer7, outer8,
              outer9, outer10, outer12, outer13, outer14,
-             outer15, outer19, outer20, outer21, outer22]
+             outer15, outer19, outer20, outer21]
         for ref in f:
             cfunc = njit(ref)
             var = 10
@@ -440,9 +434,9 @@ class TestInlinedClosure(TestCase):
         self.assertIn(msg, str(raises.exception))
 
         with self.assertRaises(UnsupportedError) as raises:
-            cfunc = jit(nopython=True)(outer23)
+            cfunc = jit(nopython=True)(outer22)
             cfunc()
-        msg = "Inlining a closure with a star parameter is unsupported."
+        msg = "Calling a closure with *args is unsupported."
         self.assertIn(msg, str(raises.exception))
 
     def test_closure_renaming_scheme(self):

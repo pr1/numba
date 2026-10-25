@@ -744,8 +744,7 @@ def has_no_side_effect(rhs, lives, call_table):
             call_list == [parfor.internal_prange] or
             call_list == ['ceil', math] or
             call_list == [max] or
-            call_list == [int] or
-            call_list == [tuple]):
+            call_list == [int]):
             return True
         elif (isinstance(call_list[0], _Intrinsic) and
               (call_list[0]._name == 'empty_inferred' or
