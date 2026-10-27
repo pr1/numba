@@ -25,7 +25,7 @@ from numba.core.ir_utils import (raise_on_unsupported_feature, warn_deprecated,
                                  get_definition,
                                  build_definitions, compute_cfg_from_blocks,
                                  is_operator_or_getitem,
-                                 replace_vars)
+                                 replace_vars, mk_unique_var)
 from numba.core import postproc
 from llvmlite import binding as llvm
 
@@ -855,6 +855,211 @@ class InlineOverloads(FunctionPass):
             return False
         expr.args.insert(0, func_def.value)
         return True
+
+
+@register_pass(mutates_CFG=False, analysis_only=False)
+class ExplicitOptionalCasts(FunctionPass):
+    """Give each cast of an Optional to its value a statement of its own.
+
+    Typing accepts an Optional(T) where an operation takes T, and lowering
+    casts it there, checking that it holds a value. The passes in between,
+    the parfor passes among them, see only the Optional. Afterwards an
+    operation that takes T is given a variable of type T, cast from the
+    Optional before its first use as a value in the block, and an Optional
+    is used only where it is taken as one: tested, copied, stored, returned,
+    cast or passed as an Optional. Any other use of one is unsupported.
+    """
+
+    _name = "explicit_optional_casts"
+
+    def __init__(self):
+        FunctionPass.__init__(self)
+
+    def run_pass(self, state):
+        casts = _OptionalCasts(state.typemap, state.calltypes)
+        for block in state.func_ir.blocks.values():
+            block.body = casts.rewrite(block.body)
+        if casts.changed:
+            state.func_ir._definitions = build_definitions(state.func_ir.blocks)
+        return casts.changed
+
+
+class _OptionalCasts:
+    """Rewrites statements so that each Optional a statement takes as its
+    value is cast before it, where lowering would cast it."""
+
+    def __init__(self, typemap, calltypes):
+        self.typemap = typemap
+        self.calltypes = calltypes
+        self.changed = False
+
+    def rewrite(self, stmts):
+        self.body = []
+        self.values = {}
+        for stmt in stmts:
+            if self._optionals(stmt):
+                stmt = self._copy(stmt)
+                self.kept = set()
+                self._rewrite(stmt)
+                for var in self._optionals(stmt):
+                    if var.name not in self.kept:
+                        msg = (f"Use of Optional '{var.unversioned_name}' in "
+                               f"'{stmt}' is unsupported.")
+                        raise errors.UnsupportedError(msg, stmt.loc)
+                self.changed = True
+            if isinstance(stmt, ir.Assign):
+                self.values.pop(stmt.target.name, None)
+            self.body.append(stmt)
+        return self.body
+
+    def _optionals(self, stmt):
+        """The Optional variables *stmt* uses."""
+        defined = stmt.target.name if isinstance(stmt, ir.Assign) else None
+        return [var for var in stmt.list_vars() if var.name != defined
+                and isinstance(self.typemap[var.name], types.Optional)]
+
+    def _copy(self, stmt):
+        """A copy of *stmt* to rewrite: copies of the IR share statements, as
+        loop lifting's do for each signature it compiles."""
+        new = copy(stmt)
+        typed, copied = stmt, new  # what calltypes may hold
+        if isinstance(stmt, ir.Assign) and isinstance(stmt.value, ir.Expr):
+            typed = stmt.value
+            copied = new.value = ir.Expr(typed.op, typed.loc, **typed._kws)
+        if typed in self.calltypes:
+            self.calltypes[copied] = self.calltypes[typed]
+        return new
+
+    def value(self, var):
+        """*var*'s value: *var*, or for an Optional, the variable it is cast
+        to before its first use as a value in the block."""
+        vty = self.typemap[var.name]
+        if not isinstance(vty, types.Optional):
+            return var
+        if var.name not in self.values:
+            value = ir.Var(var.scope, mk_unique_var("$optional_value"),
+                           var.loc)
+            self.typemap[value.name] = vty.type
+            self.body.append(ir.Assign(ir.Expr.cast(var, var.loc), value,
+                                       var.loc))
+            self.values[var.name] = value
+        return self.values[var.name]
+
+    def keep(self, var):
+        """*var*, taken as it is typed."""
+        if isinstance(self.typemap[var.name], types.Optional):
+            self.kept.add(var.name)
+        return var
+
+    def cast(self, var, ty):
+        """The variable to use where lowering casts *var* to *ty*."""
+        if isinstance(ty, types.DeferredType):
+            ty = ty.get()
+        if isinstance(ty, types.Optional):
+            return self.keep(var)
+        return self.value(var)
+
+    def _rewrite(self, stmt):
+        cast, value, calltypes = self.cast, self.value, self.calltypes
+        if isinstance(stmt, ir.Assign):
+            if isinstance(stmt.value, ir.Var):
+                stmt.value = cast(stmt.value, self.typemap[stmt.target.name])
+            elif isinstance(stmt.value, ir.Expr):
+                self._rewrite_expr(stmt.value)
+        elif isinstance(stmt, ir.Return):
+            # a generator's isn't lowered, any other's is of the return type
+            self.keep(stmt.value)
+        elif isinstance(stmt, ir.SetItem):
+            sig = calltypes[stmt]
+            stmt.target = value(stmt.target)
+            stmt.index = cast(stmt.index, sig.args[1])
+            stmt.value = cast(stmt.value, sig.args[2])
+        elif isinstance(stmt, ir.StaticSetItem):
+            stmt.target = value(stmt.target)
+            stmt.value = cast(stmt.value, calltypes[stmt].args[2])
+        elif isinstance(stmt, ir.StoreMap):
+            sig = calltypes[stmt]
+            stmt.dct = value(stmt.dct)
+            stmt.key = cast(stmt.key, sig.args[1])
+            stmt.value = cast(stmt.value, sig.args[2])
+        elif isinstance(stmt, ir.DelItem):
+            sig = calltypes[stmt]
+            stmt.target = cast(stmt.target, sig.args[0])
+            stmt.index = cast(stmt.index, sig.args[1])
+        elif isinstance(stmt, ir.SetAttr):
+            sig = calltypes[stmt]
+            stmt.target = cast(stmt.target, sig.args[0])
+            stmt.value = cast(stmt.value, sig.args[1])
+        elif isinstance(stmt, ir.Print):
+            folded = self._folded(calltypes[stmt], len(stmt.args), (),
+                                  stmt.vararg)
+            stmt.args = tuple(cast(v, folded[i]) if i in folded
+                              else self.keep(v)
+                              for i, v in enumerate(stmt.args))
+        elif isinstance(stmt, (ir.DynamicRaise, ir.DynamicTryRaise)):
+            for arg in stmt.exc_args:
+                if isinstance(arg, ir.Var):
+                    self.keep(arg)
+
+    def _rewrite_expr(self, expr):
+        cast, keep, op = self.cast, self.keep, expr.op
+        sig = self.calltypes.get(expr)
+        if op == "call":
+            if (isinstance(self.typemap[expr.func.name],
+                           types.ObjModeDispatcher)
+                    or isinstance(sig.return_type, types.Phantom)):
+                folded = {}
+            else:
+                folded = self._folded(sig, len(expr.args),
+                                      [k for k, _ in expr.kws], expr.vararg)
+            # an argument lowering doesn't cast is taken as typed: objmode
+            # boxes it, and a call returning a Phantom isn't lowered
+            expr.args = [cast(v, folded[i]) if i in folded else keep(v)
+                         for i, v in enumerate(expr.args)]
+            expr.kws = [(k, cast(v, folded[k]) if k in folded else keep(v))
+                        for k, v in expr.kws]
+        elif op in ("binop", "inplace_binop"):
+            expr.lhs = cast(expr.lhs, sig.args[0])
+            expr.rhs = cast(expr.rhs, sig.args[1])
+        elif op in ("unary", "getiter", "iternext"):
+            expr.value = cast(expr.value, sig.args[0])
+        elif op == "getitem":
+            expr.value = cast(expr.value, sig.args[0])
+            expr.index = cast(expr.index, sig.args[1])
+        elif op in ("getattr", "static_getitem", "exhaust_iter"):
+            expr.value = self.value(expr.value)
+        elif op in ("build_tuple", "build_list", "build_set"):
+            expr.items = [keep(v) for v in expr.items]
+        elif op == "build_map":
+            expr.items = [(keep(k), keep(v)) for k, v in expr.items]
+        elif op == "cast":
+            keep(expr.value)
+
+    def _folded(self, sig, nargs, kws, vararg):
+        """The type each argument of a call is cast to, by position or
+        keyword, folded as Lower.fold_call_args folds them."""
+        positions = list(range(nargs))
+        if vararg is not None:
+            positions += [None] * len(self.typemap[vararg.name])
+        if sig.pysig is None:
+            return dict(zip(positions, sig.args))
+        folded = {}
+
+        def normal_handler(index, param, key):
+            folded[key] = sig.args[index]
+
+        def stararg_handler(index, param, keys):
+            folded.update(zip(keys, sig.args[index]))
+
+        try:
+            typing.fold_arguments(sig.pysig, positions, {k: k for k in kws},
+                                  normal_handler, lambda *args: None,
+                                  stararg_handler)
+        except errors.TypingError:
+            # not lowered as a call: StencilPass rewrites a stencil call,
+            # whose options are extra keywords. Lowering raises for any other.
+            return {}
+        return folded
 
 
 @register_pass(mutates_CFG=False, analysis_only=False)

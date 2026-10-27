@@ -1298,7 +1298,8 @@ class ArrayAnalysis(object):
                     if 'rhs' in result.kwargs:
                         inst.value = result.kwargs['rhs']
             elif isinstance(inst.value, (ir.Var, ir.Const)):
-                shape = inst.value
+                if not self._optional(lhs, inst.value):
+                    shape = inst.value
             elif isinstance(inst.value, ir.Global):
                 gvalue = inst.value.value
                 # only integer values can be part of shape
@@ -1581,7 +1582,16 @@ class ArrayAnalysis(object):
         return None
 
     def _analyze_op_cast(self, scope, equiv_set, expr, lhs):
+        if self._optional(lhs, expr.value):
+            return None
         return ArrayAnalysis.AnalyzeResult(shape=expr.value)
+
+    def _optional(self, *values):
+        """Whether any of *values* is an Optional variable: an Optional has
+        no shape, and none is carried to or from one."""
+        return any(isinstance(v, ir.Var)
+                   and isinstance(self.typemap[v.name], types.Optional)
+                   for v in values)
 
     def _analyze_op_exhaust_iter(self, scope, equiv_set, expr, lhs):
         var = expr.value

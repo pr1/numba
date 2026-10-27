@@ -29,6 +29,7 @@ from numba.core.typed_passes import (NopythonTypeInference, AnnotateTypes,
                                      ParforPass, DumpParforDiagnostics,
                                      IRLegalization, NoPythonBackend,
                                      InlineOverloads, PreLowerStripPhis,
+                                     ExplicitOptionalCasts,
                                      NativeLowering, NativeParforLowering,
                                      NoPythonSupportedFeatureValidation,
                                      ParforFusionPass, ParforPreLoweringPass
@@ -607,6 +608,7 @@ class DefaultPassBuilder(object):
 
         # optimisation
         pm.add_pass(InlineOverloads, "inline overloaded functions")
+        pm.add_pass(ExplicitOptionalCasts, "make Optional casts explicit")
         if state.flags.auto_parallel.enabled:
             pm.add_pass(PreParforPass, "Preprocessing for parfors")
         if not state.flags.no_rewrites:
