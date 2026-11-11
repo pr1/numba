@@ -57,7 +57,9 @@ class CFunc(object):
         self._cache_hits = 0
 
     def enable_caching(self):
-        self._cache = FunctionCache(self._pyfunc)
+        flags = self._targetdescr.options.set_flags(
+            compiler.Flags(), self._compiler.targetoptions)
+        self._cache = FunctionCache(self._pyfunc, flags)
 
     @global_compiler_lock
     def compile(self):

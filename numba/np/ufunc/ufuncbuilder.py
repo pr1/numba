@@ -105,7 +105,9 @@ class UFuncDispatcher(serialize.ReduceMixin):
         return cls(py_func=pyfunc, locals=locals, targetoptions=targetoptions)
 
     def enable_caching(self):
-        self.cache = FunctionCache(self.py_func)
+        flags = self.targetdescr.options.set_flags(compiler.Flags(),
+                                                   self.targetoptions)
+        self.cache = FunctionCache(self.py_func, flags)
 
     def compile(self, sig, locals=None, **targetoptions):
         if locals is None:

@@ -819,7 +819,9 @@ class Dispatcher(serialize.ReduceMixin, _MemoMixin, _DispatcherBase):
         return types.Dispatcher(self)
 
     def enable_caching(self):
-        self._cache = FunctionCache(self.py_func)
+        flags = self.targetdescr.options.set_flags(compiler.Flags(),
+                                                   self.targetoptions)
+        self._cache = FunctionCache(self.py_func, flags)
 
     def __get__(self, obj, objtype=None):
         '''Allow a JIT function to be bound as a method to an object'''

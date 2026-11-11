@@ -837,8 +837,19 @@ class Cache(_Cache):
 class FunctionCache(Cache):
     """
     Implements Cache that saves and loads CompileResult objects.
+
+    An entry is for the flags the compiling object's options set
+    (``TargetOptions.set_flags``): two objects that compile one function with
+    different options don't share entries.
     """
     _impl_class = CompileResultCacheImpl
+
+    def __init__(self, py_func, flags):
+        self._flags = flags
+        super().__init__(py_func)
+
+    def _index_key(self, sig, codegen):
+        return super()._index_key(sig, codegen) + (self._flags,)
 
 
 # Remember used cache filename prefixes.
