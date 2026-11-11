@@ -1153,9 +1153,10 @@ class TestOverloadInlining(MemoryLeakMixin, InliningBase):
         (retyped,) = template._inline_overloads.values()
         self.assertIs(retyped['iinfo'], typed['iinfo'])
 
-    def test_inline_always_typed_for_each_implementation(self):
-        # Typed IR is reused only for the implementation it was typed from:
-        # under other flags, an overload may choose another one.
+    def test_inline_always_typed_for_each_flags(self):
+        # Typed IR is reused only under the flags it was typed under: an
+        # overload it inlines may choose another implementation under others,
+        # though its own implementation is the same function.
         def foo(x):
             pass
 
@@ -1163,22 +1164,32 @@ class TestOverloadInlining(MemoryLeakMixin, InliningBase):
         def foo_overload(x):
             if targetconfig.ConfigStack.top_or_none().fastmath:
                 def impl(x):
-                    return x + 2
+                    return x + 0.5
             else:
                 def impl(x):
                     return x + 1
             return impl
 
+        def outer(x):
+            pass
+
+        def outer_impl(x):
+            return foo(x)
+
+        @overload(outer, inline='always')
+        def outer_overload(x):
+            return outer_impl
+
         @njit
         def bar(x):
-            return foo(x)
+            return outer(x)
 
         @njit(fastmath=True)
         def baz(x):
-            return foo(x)
+            return outer(x)
 
         self.assertEqual(bar(1), 2)
-        self.assertEqual(baz(1), 3)
+        self.assertEqual(baz(1), 1.5)
 
 
 class TestOverloadMethsAttrsInlining(InliningBase):
