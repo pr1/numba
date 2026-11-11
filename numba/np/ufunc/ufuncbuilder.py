@@ -105,9 +105,7 @@ class UFuncDispatcher(serialize.ReduceMixin):
         return cls(py_func=pyfunc, locals=locals, targetoptions=targetoptions)
 
     def enable_caching(self):
-        flags = self.targetdescr.options.set_flags(compiler.Flags(),
-                                                   self.targetoptions)
-        self.cache = FunctionCache(self.py_func, flags)
+        self.cache = FunctionCache(self.py_func)
 
     def compile(self, sig, locals=None, **targetoptions):
         if locals is None:
@@ -154,8 +152,9 @@ class UFuncDispatcher(serialize.ReduceMixin):
         with global_compiler_lock:
             with targetconfig.ConfigStack().enter(flags.copy()):
                 with store_overloads_on_success():
-                    # attempt look up of existing
-                    cres = self.cache.load_overload(sig, targetctx)
+                    # attempt look up of existing: an entry is for the
+                    # signature compiled with these flags
+                    cres = self.cache.load_overload((sig, flags), targetctx)
                     if cres is not None:
                         return cres
 
@@ -167,7 +166,7 @@ class UFuncDispatcher(serialize.ReduceMixin):
                                                   flags=flags, locals=locals)
 
                     # cache lookup failed before so safe to save
-                    self.cache.save_overload(sig, cres)
+                    self.cache.save_overload((sig, flags), cres)
 
                     return cres
 

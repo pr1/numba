@@ -42,19 +42,6 @@ class TargetOptions:
         opt.finalize(flags, options)
         return flags
 
-    @classmethod
-    def set_flags(cls, flags, options):
-        """Set ``flags`` from the target options in ``options`` alone, with
-        no defaults and nothing inherited from a function being compiled.
-
-        Parameters
-        ----------
-        flags : Flags
-        options : dict
-        """
-        cls()._apply(flags, options)
-        return flags
-
     def _apply(self, flags, options):
         # Find all Mapping instances in the class
         mappings = {}

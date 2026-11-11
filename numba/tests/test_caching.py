@@ -20,7 +20,6 @@ import numpy as np
 
 from numba import njit
 from numba.core import codegen
-from numba.core.compiler import Flags
 from numba.core.caching import (
     UserWideCacheLocator,
     ZipCacheLocator,
@@ -908,9 +907,9 @@ class TestSequentialParForsCache(DispatcherCacheUsecasesTest):
 
 class TestCacheFlags(DispatcherCacheUsecasesTest):
     """
-    An entry is for the options of the dispatcher that compiled it: two
-    dispatchers of one function that differ only in options don't share
-    entries, and each finds its own again.
+    An entry is for the flags it was compiled with: the options of the
+    dispatcher, and what it inherits from the function whose compilation it
+    is called from. Entries compiled with other flags aren't served.
     """
 
     def test_options(self):
@@ -925,6 +924,22 @@ class TestCacheFlags(DispatcherCacheUsecasesTest):
         again = njit(cache=True, fastmath=True)(add)
         self.assertPreciseEqual(again(2.0, 3.0), 6.0)
         self.check_hits(again, 1, 0)
+
+    def test_inherited(self):
+        add = self.import_module().add_usecase.py_func
+        inner = njit(cache=True)(add)
+
+        @njit(fastmath=True)
+        def outer(x, y):
+            return inner(x, y)
+
+        # compiled from outer, inner inherits its fastmath
+        self.assertPreciseEqual(outer(2.0, 3.0), 6.0)
+        self.check_hits(inner, 0, 1)
+        # called from Python, it inherits nothing
+        alone = njit(cache=True)(add)
+        self.assertPreciseEqual(alone(2.0, 3.0), 6.0)
+        self.check_hits(alone, 0, 1)
 
 
 class TestCacheWithCpuSetting(DispatcherCacheUsecasesTest):
@@ -1354,7 +1369,7 @@ class TestCacheLocatorEnvironmentIntegration(TestCase):
             "foo,bar",
         ):
             with self.assertRaises(RuntimeError):
-                FunctionCache(mock_func, Flags())
+                FunctionCache(mock_func)
 
     def test_locators_env_override_single(self):
         def mock_func():
@@ -1364,7 +1379,7 @@ class TestCacheLocatorEnvironmentIntegration(TestCase):
             "NUMBA_CACHE_LOCATOR_CLASSES",
             "InTreeCacheLocatorFsAgnostic",
         ):
-            cache = FunctionCache(mock_func, Flags())
+            cache = FunctionCache(mock_func)
             expectedLocator = InTreeCacheLocatorFsAgnostic
             self.assertIsInstance(cache._impl.locator,
                                   expectedLocator)
@@ -1377,7 +1392,7 @@ class TestCacheLocatorEnvironmentIntegration(TestCase):
             "NUMBA_CACHE_LOCATOR_CLASSES",
             f"{__name__}.TestLocator",
         ):
-            cache = FunctionCache(mock_func, Flags())
+            cache = FunctionCache(mock_func)
             expectedLocator = TestLocator
             self.assertIsInstance(cache._impl.locator,
                                   expectedLocator)
@@ -1394,14 +1409,14 @@ class TestCacheLocatorEnvironmentIntegration(TestCase):
             "NUMBA_CACHE_LOCATOR_CLASSES",
             locatorClasses,
         ):
-            cache = FunctionCache(mock_func, Flags())
+            cache = FunctionCache(mock_func)
             self.assertIsInstance(cache._impl.locator, expectedLocator)
 
     def test_default_locators(self):
         def mock_func():
             return 42
 
-        cache = FunctionCache(mock_func, Flags())
+        cache = FunctionCache(mock_func)
         expectedLocator = InTreeCacheLocator
         self.assertIsInstance(cache._impl.locator, expectedLocator)
 

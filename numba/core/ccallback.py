@@ -57,18 +57,19 @@ class CFunc(object):
         self._cache_hits = 0
 
     def enable_caching(self):
-        flags = self._targetdescr.options.set_flags(
-            compiler.Flags(), self._compiler.targetoptions)
-        self._cache = FunctionCache(self._pyfunc, flags)
+        self._cache = FunctionCache(self._pyfunc)
 
     @global_compiler_lock
     def compile(self):
+        # The flags it compiles with; a cache entry is for the signature
+        # compiled with them
+        flags = self._compiler.resolve_flags()
         # Try to load from cache
-        cres = self._cache.load_overload(self._sig,
+        cres = self._cache.load_overload((self._sig, flags),
                                          self._targetdescr.target_context)
         if cres is None:
-            cres = self._compile_uncached()
-            self._cache.save_overload(self._sig, cres)
+            cres = self._compile_uncached(flags)
+            self._cache.save_overload((self._sig, flags), cres)
         else:
             self._cache_hits += 1
 
@@ -77,11 +78,11 @@ class CFunc(object):
         self._wrapper_address = self._library.get_pointer_to_function(
             self._wrapper_name)
 
-    def _compile_uncached(self):
+    def _compile_uncached(self, flags):
         sig = self._sig
 
         # Compile native function as well as cfunc wrapper
-        return self._compiler.compile(sig.args, sig.return_type)
+        return self._compiler.compile(sig.args, sig.return_type, flags)
 
     @property
     def native_name(self):

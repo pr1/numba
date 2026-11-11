@@ -76,14 +76,24 @@ class _FunctionCompiler(object):
                               stararg_handler)
         return self.pysig, args
 
-    def compile(self, args, return_type):
-        status, retval = self._compile_cached(args, return_type)
+    def resolve_flags(self):
+        """
+        The flags a compilation uses now: this compiler's options and, where
+        they leave one unset, what it inherits from the function being
+        compiled, if it is compiled from one.
+        """
+        flags = compiler.Flags()
+        self.targetdescr.options.parse_as_flags(flags, self.targetoptions)
+        return self._customize_flags(flags)
+
+    def compile(self, args, return_type, flags):
+        status, retval = self._compile_cached(args, return_type, flags)
         if status:
             return retval
         else:
             raise retval
 
-    def _compile_cached(self, args, return_type):
+    def _compile_cached(self, args, return_type, flags):
         key = tuple(args), return_type
         try:
             return False, self._failed_cache[key]
@@ -91,18 +101,14 @@ class _FunctionCompiler(object):
             pass
 
         try:
-            retval = self._compile_core(args, return_type)
+            retval = self._compile_core(args, return_type, flags)
         except errors.TypingError as e:
             self._failed_cache[key] = e
             return False, e
         else:
             return True, retval
 
-    def _compile_core(self, args, return_type):
-        flags = compiler.Flags()
-        self.targetdescr.options.parse_as_flags(flags, self.targetoptions)
-        flags = self._customize_flags(flags)
-
+    def _compile_core(self, args, return_type, flags):
         impl = self._get_implementation(args, {})
         cres = compiler.compile_extra(self.targetdescr.typing_context,
                                       self.targetdescr.target_context,
@@ -819,9 +825,7 @@ class Dispatcher(serialize.ReduceMixin, _MemoMixin, _DispatcherBase):
         return types.Dispatcher(self)
 
     def enable_caching(self):
-        flags = self.targetdescr.options.set_flags(compiler.Flags(),
-                                                   self.targetoptions)
-        self._cache = FunctionCache(self.py_func, flags)
+        self._cache = FunctionCache(self.py_func)
 
     def __get__(self, obj, objtype=None):
         '''Allow a JIT function to be bound as a method to an object'''
@@ -898,8 +902,11 @@ class Dispatcher(serialize.ReduceMixin, _MemoMixin, _DispatcherBase):
                 existing = self.overloads.get(tuple(args))
                 if existing is not None:
                     return existing.entry_point
+                # The flags it compiles with now; an entry in the disk cache
+                # is for the signature compiled with them
+                flags = self._compiler.resolve_flags()
                 # Try to load from disk cache
-                cres = self._cache.load_overload(sig, self.targetctx)
+                cres = self._cache.load_overload((sig, flags), self.targetctx)
                 if cres is not None:
                     self._cache_hits[sig] += 1
                     # XXX fold this in add_overload()? (also see compiler.py)
@@ -918,14 +925,14 @@ class Dispatcher(serialize.ReduceMixin, _MemoMixin, _DispatcherBase):
                 )
                 with ev.trigger_event("numba:compile", data=ev_details):
                     try:
-                        cres = self._compiler.compile(args, return_type)
+                        cres = self._compiler.compile(args, return_type, flags)
                     except errors.ForceLiteralArg as e:
                         def folded(args, kws):
                             return self._compiler.fold_argument_types(args,
                                                                       kws)[1]
                         raise e.bind_fold_arguments(folded)
                     self.add_overload(cres)
-                self._cache.save_overload(sig, cres)
+                self._cache.save_overload((sig, flags), cres)
                 return cres.entry_point
 
     def get_compile_result(self, sig):
