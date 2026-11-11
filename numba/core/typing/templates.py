@@ -16,6 +16,7 @@ from numba.core import types, utils, targetconfig
 from numba.core.errors import (
     TypingError,
     InternalError,
+    ForceLiteralArg,
 )
 from numba.core.cpu_options import InlineOptions
 
@@ -647,27 +648,35 @@ class _OverloadFunctionTemplate(AbstractTemplate):
             inline_worker = InlineWorker(tyctx, tgctx, fcomp.locals,
                                          compiler_inst, flags, None,)
 
-            # If the inlinee contains something to trigger literal arg dispatch
-            # then the pipeline call will unconditionally fail due to a raised
-            # ForceLiteralArg exception. Therefore `resolve` is run first, as
-            # type resolution must occur at some point, this will hit any
-            # `literally` calls and because it's going via the dispatcher will
-            # handle them correctly i.e. ForceLiteralArg propagates. This having
-            # the desired effect of ensuring the pipeline call is only made in
-            # situations that will succeed. For context see #5887.
+            # A `literally` call in the inlinee raises ForceLiteralArg, which
+            # the caller acts on once it knows how to fold the arguments. A
+            # dispatcher's compile binds that; an always inlined overload is
+            # never compiled (_build_impl), so it is bound here as there. For
+            # context see #5887.
             resolve = disp_type.dispatcher.get_call_template
             template, pysig, folded_args, kws = resolve(new_args, kws)
-            ir = inline_worker.run_untyped_passes(
-                disp_type.dispatcher.py_func, enable_ssa=True
-            )
+            # Typed already for these arguments, by this implementation:
+            # typing it again would store the same for the pastes to read.
+            typed = self._inline_overloads.get(tuple(folded_args), {})
+            if 'iinfo' in typed and \
+                    typed['iinfo'].func_ir.func_id.func is disp.py_func:
+                return typed['iinfo'].signature
+            try:
+                ir = inline_worker.run_untyped_passes(
+                    disp_type.dispatcher.py_func, enable_ssa=True
+                )
 
-            (
-                typemap,
-                return_type,
-                calltypes,
-                _
-            ) = typed_passes.type_inference_stage(
-                self.context, tgctx, ir, folded_args, None)
+                (
+                    typemap,
+                    return_type,
+                    calltypes,
+                    _
+                ) = typed_passes.type_inference_stage(
+                    self.context, tgctx, ir, folded_args, None)
+            except ForceLiteralArg as e:
+                def folded(args, kws):
+                    return disp._compiler.fold_argument_types(args, kws)[1]
+                raise e.bind_fold_arguments(folded)
             ir = PreLowerStripPhis()._strip_phi_nodes(ir)
             ir._definitions = numba.core.ir_utils.build_definitions(ir.blocks)
 
@@ -819,9 +828,14 @@ class _OverloadFunctionTemplate(AbstractTemplate):
         # Make dispatcher
         jitdecor = jitter(**self._jit_options)
         disp = jitdecor(pyfunc)
-        # Make sure that the implementation can be fully compiled
-        disp_type = types.Dispatcher(disp)
-        disp_type.get_call_type(self.context, args, kws)
+        if self._inline.is_always_inline:
+            # Only ever pasted: generic types it for the caller, and nothing
+            # builds it, here or in get_call_template.
+            disp._can_compile = False
+        else:
+            # Make sure that the implementation can be fully compiled
+            disp_type = types.Dispatcher(disp)
+            disp_type.get_call_type(self.context, args, kws)
         if cache_key is not None:
             self._impl_cache[cache_key] = disp, args
         return disp, args
