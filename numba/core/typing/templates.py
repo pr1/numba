@@ -648,19 +648,19 @@ class _OverloadFunctionTemplate(AbstractTemplate):
             inline_worker = InlineWorker(tyctx, tgctx, fcomp.locals,
                                          compiler_inst, flags, None,)
 
+            resolve = disp_type.dispatcher.get_call_template
+            template, pysig, folded_args, kws = resolve(new_args, kws)
+            # Typed already with this dispatcher, which _get_impl makes per
+            # arguments and flags: typing it again would store the same for
+            # the pastes to read.
+            typed = self._inline_overloads.get(tuple(folded_args), {})
+            if typed.get('disp') is disp:
+                return typed['iinfo'].signature
             # A `literally` call in the inlinee raises ForceLiteralArg, which
             # the caller acts on once it knows how to fold the arguments. A
             # dispatcher's compile binds that; an always inlined overload is
             # never compiled (_build_impl), so it is bound here as there. For
             # context see #5887.
-            resolve = disp_type.dispatcher.get_call_template
-            template, pysig, folded_args, kws = resolve(new_args, kws)
-            # Typed already for these arguments, by this implementation:
-            # typing it again would store the same for the pastes to read.
-            typed = self._inline_overloads.get(tuple(folded_args), {})
-            if 'iinfo' in typed and \
-                    typed['iinfo'].func_ir.func_id.func is disp.py_func:
-                return typed['iinfo'].signature
             try:
                 ir = inline_worker.run_untyped_passes(
                     disp_type.dispatcher.py_func, enable_ssa=True
@@ -703,7 +703,7 @@ class _OverloadFunctionTemplate(AbstractTemplate):
                 # model function call
             iinfo = _inline_info(ir, typemap, calltypes, sig)
             self._inline_overloads[sig.args] = {'folded_args': folded_args,
-                                                'iinfo': iinfo}
+                                                'iinfo': iinfo, 'disp': disp}
         else:
             sig = disp_type.get_call_type(self.context, new_args, kws)
             if sig is None: # can't resolve for this target
