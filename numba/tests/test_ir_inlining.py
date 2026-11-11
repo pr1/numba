@@ -21,6 +21,7 @@ from numba.core.extending import (
     register_jitable,
 )
 from numba.core.cpu import InlineOptions
+from numba.core.registry import cpu_target
 from numba.core.compiler import DefaultPassBuilder, CompilerBase
 from numba.core.typed_passes import InlineOverloads
 from numba.core.typing import signature
@@ -1099,6 +1100,30 @@ class TestOverloadInlining(MemoryLeakMixin, InliningBase):
         # There should be no warnings as the IR scopes should be consistent with
         # the IR involved.
         self.assertEqual(len(w), 0)
+
+    def test_inline_always_not_built(self):
+        # An always inlined overload is only ever pasted into its callers, so
+        # it is never compiled on its own.
+        def foo(x):
+            pass
+
+        @overload(foo, inline='always')
+        def foo_overload(x):
+            def impl(x):
+                return x + 1
+            return impl
+
+        @njit
+        def bar(x):
+            return foo(x)
+
+        self.assertEqual(bar(1), 2)
+        fnty = cpu_target.typing_context.resolve_value_type(foo)
+        dispatchers = [disp for template in fnty.templates
+                       for disp, _ in template._impl_cache.values()]
+        self.assertTrue(dispatchers)
+        for disp in dispatchers:
+            self.assertEqual(disp.signatures, [])
 
 
 class TestOverloadMethsAttrsInlining(InliningBase):
