@@ -170,3 +170,13 @@ def self_test():
 @jit(parallel=True, cache=True, nopython=True)
 def parfor_usecase(ary):
     return ary * ary + ary
+
+
+@jit(inline='always', nopython=True)
+def _inlined(x):
+    return x + Z
+
+
+@jit(cache=True, nopython=True)
+def inlining_usecase(x):
+    return _inlined(x)

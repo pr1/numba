@@ -110,11 +110,13 @@ class _FunctionCompiler(object):
 
     def _compile_core(self, args, return_type, flags):
         impl = self._get_implementation(args, {})
+        # A copy: the pipeline changes its flags as it goes (inlining sets
+        # enable_ssa), and these are the cache's key
         cres = compiler.compile_extra(self.targetdescr.typing_context,
                                       self.targetdescr.target_context,
                                       impl,
                                       args=args, return_type=return_type,
-                                      flags=flags, locals=self.locals,
+                                      flags=flags.copy(), locals=self.locals,
                                       pipeline_class=self.pipeline_class)
         # Check typing error if object mode is used
         if cres.typing_error is not None and not flags.enable_pyobject:

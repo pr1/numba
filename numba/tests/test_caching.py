@@ -940,6 +940,27 @@ class TestCacheFlags(DispatcherCacheUsecasesTest):
         alone = njit(cache=True)(add)
         self.assertPreciseEqual(alone(2.0, 3.0), 6.0)
         self.check_hits(alone, 0, 1)
+        # compiled from another fastmath caller, it is served what inner saved
+        again = njit(cache=True)(add)
+
+        @njit(fastmath=True)
+        def other(x, y):
+            return again(x, y)
+
+        self.assertPreciseEqual(other(2.0, 3.0), 6.0)
+        self.check_hits(again, 1, 0)
+
+    def test_inlined(self):
+        # a compilation that inlines an inline='always' function is served
+        # again: the key is the flags resolved before it, which it must not
+        # change
+        inlining = self.import_module().inlining_usecase.py_func
+        first = njit(cache=True)(inlining)
+        self.assertPreciseEqual(first(2.0), 3.0)
+        self.check_hits(first, 0, 1)
+        again = njit(cache=True)(inlining)
+        self.assertPreciseEqual(again(2.0), 3.0)
+        self.check_hits(again, 1, 0)
 
 
 class TestCacheWithCpuSetting(DispatcherCacheUsecasesTest):

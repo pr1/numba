@@ -158,12 +158,14 @@ class UFuncDispatcher(serialize.ReduceMixin):
                     if cres is not None:
                         return cres
 
-                    # Compile
+                    # Compile, with a copy of the flags: the pipeline changes
+                    # its own, and these are the cache's key
                     args, return_type = sigutils.normalize_signature(sig)
                     cres = compiler.compile_extra(typingctx, targetctx,
                                                   self.py_func, args=args,
                                                   return_type=return_type,
-                                                  flags=flags, locals=locals)
+                                                  flags=flags.copy(),
+                                                  locals=locals)
 
                     # cache lookup failed before so safe to save
                     self.cache.save_overload((sig, flags), cres)
