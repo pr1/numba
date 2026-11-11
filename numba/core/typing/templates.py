@@ -655,6 +655,12 @@ class _OverloadFunctionTemplate(AbstractTemplate):
             # context see #5887.
             resolve = disp_type.dispatcher.get_call_template
             template, pysig, folded_args, kws = resolve(new_args, kws)
+            # Typed already for these arguments, by this implementation:
+            # typing it again would store the same for the pastes to read.
+            typed = self._inline_overloads.get(tuple(folded_args), {})
+            if 'iinfo' in typed and \
+                    typed['iinfo'].func_ir.func_id.func is disp.py_func:
+                return typed['iinfo'].signature
             try:
                 ir = inline_worker.run_untyped_passes(
                     disp_type.dispatcher.py_func, enable_ssa=True

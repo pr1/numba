@@ -9,7 +9,8 @@ from itertools import product
 import numpy as np
 
 from numba import njit, typeof, literally, prange
-from numba.core import types, ir, ir_utils, cgutils, errors, utils
+from numba.core import (types, ir, ir_utils, cgutils, errors, utils,
+                        targetconfig)
 from numba.core.extending import (
     overload,
     overload_method,
@@ -1124,6 +1125,60 @@ class TestOverloadInlining(MemoryLeakMixin, InliningBase):
         self.assertTrue(dispatchers)
         for disp in dispatchers:
             self.assertEqual(disp.signatures, [])
+
+    def test_inline_always_typed_once(self):
+        # An always inlined overload is typed once per implementation and
+        # signature: a second caller pastes what the first was typed.
+        def foo(x):
+            pass
+
+        @overload(foo, inline='always')
+        def foo_overload(x):
+            def impl(x):
+                return x + 1
+            return impl
+
+        @njit
+        def bar(x):
+            return foo(x)
+
+        @njit
+        def baz(x):
+            return foo(x) * 2
+
+        self.assertEqual(bar(1), 2)
+        (template,) = cpu_target.typing_context.resolve_value_type(foo).templates
+        (typed,) = template._inline_overloads.values()
+        self.assertEqual(baz(1), 4)
+        (retyped,) = template._inline_overloads.values()
+        self.assertIs(retyped['iinfo'], typed['iinfo'])
+
+    def test_inline_always_typed_for_each_implementation(self):
+        # Typed IR is reused only for the implementation it was typed from:
+        # under other flags, an overload may choose another one.
+        def foo(x):
+            pass
+
+        @overload(foo, inline='always')
+        def foo_overload(x):
+            if targetconfig.ConfigStack.top_or_none().fastmath:
+                def impl(x):
+                    return x + 2
+            else:
+                def impl(x):
+                    return x + 1
+            return impl
+
+        @njit
+        def bar(x):
+            return foo(x)
+
+        @njit(fastmath=True)
+        def baz(x):
+            return foo(x)
+
+        self.assertEqual(bar(1), 2)
+        self.assertEqual(baz(1), 3)
 
 
 class TestOverloadMethsAttrsInlining(InliningBase):
