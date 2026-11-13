@@ -818,8 +818,18 @@ class Dispatcher(serialize.ReduceMixin, _MemoMixin, _DispatcherBase):
     def _numba_type_(self):
         return types.Dispatcher(self)
 
-    def enable_caching(self):
-        self._cache = FunctionCache(self.py_func)
+    def enable_caching(self, cache=True):
+        """
+        Give this dispatcher a disk cache: for ``True``, a FunctionCache of
+        its Python function; otherwise ``cache`` is a callable, and the cache
+        is ``cache(self)``. It gets the dispatcher so that it can key what
+        sets this dispatcher apart from another of the same function, such as
+        its target options.
+        """
+        if cache is True:
+            self._cache = FunctionCache(self.py_func)
+        else:
+            self._cache = cache(self)
 
     def __get__(self, obj, objtype=None):
         '''Allow a JIT function to be bound as a method to an object'''
