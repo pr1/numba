@@ -245,6 +245,7 @@ class TestArrayManipulation(MemoryLeakMixin, TestCase):
         arr = np.arange(24)
         check(arr, (24,))
         check(arr, (4, 6))
+        check(arr, (np.uint64(4), np.uint64(6)))
         check(arr, (8, 3))
         check(arr, (8, 1, 3))
         check(arr, (1, 8, 1, 1, 3, 1))
