@@ -224,7 +224,7 @@ def _jit(sigs, locals, target, cache, targetoptions, **dispatcher_args):
                           targetoptions=targetoptions,
                           **dispatcher_args)
         if cache:
-            disp.enable_caching()
+            disp.enable_caching(cache)
         if sigs is not None:
             # Register the Dispatcher to the type inference mechanism,
             # even though the decorator hasn't returned yet.
