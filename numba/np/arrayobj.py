@@ -1898,6 +1898,17 @@ def ol_raise_with_shape_context_generic(src_shapes, index_shape):
         return impl
 
 
+class SliceShapeError(ValueError):
+    # Slice assignment's shape mismatch. Compiled code raises it with the two
+    # shapes and Python writes the message: written in compiled code, it would
+    # compile Numba's string support into every function that assigns a slice
+    # from an array.
+    def __str__(self):
+        index_shape, src_shapes = self.args
+        return (f"cannot assign slice of shape {index_shape} from input of "
+                f"shape {src_shapes}")
+
+
 @overload(raise_with_shape_context, target="CPU")
 def ol_raise_with_shape_context_cpu(src_shapes, index_shape):
     if (isinstance(src_shapes, types.UniTuple) and
@@ -1906,17 +1917,7 @@ def ol_raise_with_shape_context_cpu(src_shapes, index_shape):
             isinstance(src_shapes.dtype, types.Integer)):
 
         def impl(src_shapes, index_shape):
-            if len(src_shapes) == 1:
-                shape_str = f"({src_shapes[0]},)"
-            else:
-                shape_str = f"({', '.join([str(x) for x in src_shapes])})"
-            if len(index_shape) == 1:
-                index_str = f"({index_shape[0]},)"
-            else:
-                index_str = f"({', '.join([str(x) for x in index_shape])})"
-            msg = (f"cannot assign slice of shape {index_str} from input of "
-                   f"shape {shape_str}")
-            raise ValueError(msg)
+            raise SliceShapeError(index_shape, src_shapes)
         return impl
 
 

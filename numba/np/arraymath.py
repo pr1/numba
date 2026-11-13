@@ -600,19 +600,15 @@ axis_bound_err = ValueError if numpy_version < (1, 25)\
 
 @register_jitable
 def check_axis_bounds(a, axis):
+    # Raises with the axis and ndim, and NumPy's AxisError writes the message:
+    # written here, it would compile Numba's string support into every caller.
     if axis is not None:
         if isinstance(axis, tuple):
             for ax in axis:
                 if ax < -a.ndim or ax >= a.ndim:
-                    raise axis_bound_err(
-                        f"axis {ax} is out of bounds for "
-                        f"array of dimension {a.ndim}"
-                    )
+                    raise axis_bound_err(ax, a.ndim)
         elif axis < -a.ndim or axis >= a.ndim:
-            raise axis_bound_err(
-                f"axis {axis} is out of bounds for "
-                f"array of dimension {a.ndim}"
-            )
+            raise axis_bound_err(axis, a.ndim)
 
 
 @register_jitable
