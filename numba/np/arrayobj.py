@@ -2422,6 +2422,20 @@ def _attempt_nocopy_reshape(context, builder, aryty, ary,
     return res
 
 
+def _c_strides(context, builder, aryty, dims):
+    """
+    The C-contiguous strides of an array of *aryty*'s dtype with the shape
+    *dims*, a sequence of LLVM values: the item size on the last axis, and on
+    each axis before it the next axis' stride times its extent.
+    """
+    stride = context.get_constant(types.intp, get_itemsize(context, aryty))
+    strides = []
+    for dim in reversed(dims):
+        strides.insert(0, stride)
+        stride = builder.mul(stride, dim)
+    return strides
+
+
 def normalize_reshape_value(origsize, shape):
     num_neg_value = 0
     known_size = 1
@@ -2495,21 +2509,38 @@ def array_reshape(context, builder, sig, args):
 
     # Perform reshape (nocopy)
     newnd = shapety.count
-    newstrides = cgutils.alloca_once(builder, ll_shape)
+    if aryty.layout == 'C':
+        # A C-contiguous array reshapes without a copy whenever its size is
+        # unchanged, which the normalizer checked, and its new strides are the
+        # new shape's C strides. The normalizer rewrites only a negative
+        # extent, the one it infers, so the others come from the tuple itself.
+        # Kept out of memory and the helper, the shape and strides stay values
+        # the optimizer can follow: constants where the tuple's are.
+        dims = cgutils.unpack_tuple(builder, shape, newnd)
+        if shapety.dtype.signed:
+            normalized = cgutils.unpack_tuple(builder, builder.load(newshape),
+                                              newnd)
+            dims = [builder.select(builder.icmp_signed('<', d, d.type(0)), n, d)
+                    for d, n in zip(dims, normalized)]
+        strides = _c_strides(context, builder, aryty, dims)
+    else:
+        newstrides = cgutils.alloca_once(builder, ll_shape)
+        ok = _attempt_nocopy_reshape(context, builder, aryty, ary, newnd,
+                                     newshape, newstrides)
+        fail = builder.icmp_unsigned('==', ok, ok.type(0))
 
-    ok = _attempt_nocopy_reshape(context, builder, aryty, ary, newnd,
-                                 newshape, newstrides)
-    fail = builder.icmp_unsigned('==', ok, ok.type(0))
-
-    with builder.if_then(fail):
-        msg = "incompatible shape for array"
-        context.call_conv.return_user_exc(builder, NotImplementedError, (msg,))
+        with builder.if_then(fail):
+            msg = "incompatible shape for array"
+            context.call_conv.return_user_exc(builder, NotImplementedError,
+                                              (msg,))
+        dims = builder.load(newshape)
+        strides = builder.load(newstrides)
 
     ret = make_array(retty)(context, builder)
     populate_array(ret,
                    data=ary.data,
-                   shape=builder.load(newshape),
-                   strides=builder.load(newstrides),
+                   shape=dims,
+                   strides=strides,
                    itemsize=ary.itemsize,
                    meminfo=ary.meminfo,
                    parent=ary.parent)

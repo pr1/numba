@@ -1,5 +1,6 @@
 from functools import partial
 from itertools import permutations
+import re
 
 import numpy as np
 
@@ -244,6 +245,7 @@ class TestArrayManipulation(MemoryLeakMixin, TestCase):
         arr = np.arange(24)
         check(arr, (24,))
         check(arr, (4, 6))
+        check(arr, (np.uint64(4), np.uint64(6)))
         check(arr, (8, 3))
         check(arr, (8, 1, 3))
         check(arr, (1, 8, 1, 1, 3, 1))
@@ -261,6 +263,11 @@ class TestArrayManipulation(MemoryLeakMixin, TestCase):
         check(arr, (4, 6))
         check(arr, (8, 3))
         check(arr, (8, 1, 3))
+        # C-contiguous, with any stride on a size-1 axis
+        arr = np.lib.stride_tricks.as_strided(np.arange(6), shape=(6, 1),
+                                              strides=(8, 1000))
+        check(arr, (2, 3))
+        check(arr, (1, 6))
 
         # F-contiguous
         arr = np.arange(24).reshape((2, 3, 4)).T
@@ -303,6 +310,21 @@ class TestArrayManipulation(MemoryLeakMixin, TestCase):
 
         # Exceptions leak references
         self.disable_leak_check()
+
+    def test_array_reshape_c_contiguous_shape_folds(self):
+        # A C-contiguous array reshapes without Numba's nocopy helper, so the
+        # new shape is a value LLVM can follow: here, a constant.
+        @njit
+        def reshaped(arr):
+            out = arr.reshape((4, 6))
+            return out.shape[0] * 10 + out.shape[1]
+
+        self.assertEqual(reshaped(np.arange(24.0)), 46)
+        llvm = reshaped.inspect_llvm(reshaped.signatures[0])
+        self.assertFalse("numba_attempt_nocopy_reshape" in llvm,
+                         "the reshape calls the nocopy helper")
+        self.assertTrue(re.search(r"store i64 46, (ptr|i64\*) %retptr", llvm),
+                        "the new shape isn't a constant")
 
     def test_array_transpose_axes(self):
         pyfuncs_to_use = [numpy_transpose_array_axes_kwarg,
